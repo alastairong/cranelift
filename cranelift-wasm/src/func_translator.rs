@@ -21,8 +21,10 @@ use wasmparser::{self, BinaryReader};
 /// by a `FuncEnvironment` object. A single translator instance can be reused to translate multiple
 /// functions which will reduce heap allocation traffic.
 pub struct FuncTranslator {
-    func_ctx: FunctionBuilderContext,
-    state: TranslationState,
+    /// Func ctx
+    pub func_ctx: FunctionBuilderContext,
+    /// Translation state
+    pub state: TranslationState,
 }
 
 impl FuncTranslator {
