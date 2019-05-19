@@ -164,7 +164,7 @@ fn parse_local_decls(
 /// Declare `count` local variables of the same type, starting from `next_local`.
 ///
 /// Fail of too many locals are declared in the function, or if the type is not valid for a local.
-fn declare_locals(
+pub fn declare_locals(
     builder: &mut FunctionBuilder,
     count: u32,
     wasm_type: wasmparser::Type,
