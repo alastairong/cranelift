@@ -158,7 +158,6 @@ pub struct TranslationState {
 }
 
 impl TranslationState {
-
     /// New TranslationState
     pub fn new() -> Self {
         Self {

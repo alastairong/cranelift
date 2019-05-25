@@ -189,7 +189,8 @@ use hashmap_core::HashMap;
 #[cfg(feature = "std")]
 use std::collections::HashMap;
 
-pub use crate::frontend::{FunctionBuilder, FunctionBuilderContext};
+pub use crate::frontend::{FunctionBuilder, FunctionBuilderContext, Position};
+pub use crate::ssa::Block;
 pub use crate::switch::Switch;
 pub use crate::variable::Variable;
 

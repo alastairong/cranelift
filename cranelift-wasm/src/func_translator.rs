@@ -11,7 +11,7 @@ use crate::translation_utils::get_vmctx_value_label;
 use cranelift_codegen::entity::EntityRef;
 use cranelift_codegen::ir::{self, Ebb, InstBuilder, ValueLabel};
 use cranelift_codegen::timing;
-use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Position, Variable};
 use log::info;
 use wasmparser::{self, BinaryReader};
 
@@ -86,7 +86,8 @@ impl FuncTranslator {
         debug_assert_eq!(func.dfg.num_insts(), 0, "Function must be empty");
 
         // This clears the `FunctionBuilderContext`.
-        let mut builder = FunctionBuilder::new(func, &mut self.func_ctx);
+        let mut position = Position::default();
+        let mut builder = FunctionBuilder::new(func, &mut self.func_ctx, &mut position);
         builder.set_srcloc(cur_srcloc(&reader));
         let entry_block = builder.create_ebb();
         builder.append_ebb_params_for_function_params(entry_block);

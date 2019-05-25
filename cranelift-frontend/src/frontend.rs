@@ -36,7 +36,7 @@ pub struct FunctionBuilder<'a> {
     srcloc: ir::SourceLoc,
 
     func_ctx: &'a mut FunctionBuilderContext,
-    position: Position,
+    position: &'a mut Position,
 }
 
 #[derive(Clone, Default)]
@@ -46,7 +46,8 @@ struct EbbData {
     user_param_count: usize,
 }
 
-struct Position {
+/// Position
+pub struct Position {
     ebb: PackedOption<Ebb>,
     basic_block: PackedOption<Block>,
 }
@@ -59,7 +60,8 @@ impl Position {
         }
     }
 
-    fn default() -> Self {
+    /// Default position
+    pub fn default() -> Self {
         Self {
             ebb: PackedOption::default(),
             basic_block: PackedOption::default(),
@@ -216,13 +218,17 @@ impl<'short, 'long> InstBuilderBase<'short> for FuncInstBuilder<'short, 'long> {
 impl<'a> FunctionBuilder<'a> {
     /// Creates a new FunctionBuilder structure that will operate on a `Function` using a
     /// `FunctionBuilderContext`.
-    pub fn new(func: &'a mut Function, func_ctx: &'a mut FunctionBuilderContext) -> Self {
-        debug_assert!(func_ctx.is_empty());
+    pub fn new(
+        func: &'a mut Function,
+        func_ctx: &'a mut FunctionBuilderContext,
+        position: &'a mut Position,
+    ) -> Self {
+        //debug_assert!(func_ctx.is_empty());
         Self {
             func,
             srcloc: Default::default(),
             func_ctx,
-            position: Position::default(),
+            position,
         }
     }
 
@@ -267,7 +273,7 @@ impl<'a> FunctionBuilder<'a> {
 
         let basic_block = self.func_ctx.ssa.header_block(ebb);
         // Then we change the cursor position.
-        self.position = Position::at(ebb, basic_block);
+        *self.position = Position::at(ebb, basic_block);
     }
 
     /// Declares that all the predecessors of this block are known.
@@ -482,7 +488,7 @@ impl<'a> FunctionBuilder<'a> {
 
         // Reset srcloc and position to initial states.
         self.srcloc = Default::default();
-        self.position = Position::default();
+        *self.position = Position::default();
     }
 }
 
