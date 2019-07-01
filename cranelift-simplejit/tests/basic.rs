@@ -39,8 +39,9 @@ fn define_simple_function(module: &mut Module<SimpleJITBackend>) -> FuncId {
     let mut ctx = Context::new();
     ctx.func = Function::with_name_signature(ExternalName::user(0, func_id.as_u32()), sig);
     let mut func_ctx = FunctionBuilderContext::new();
+    let mut position = Position::default();
     {
-        let mut bcx: FunctionBuilder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
+        let mut bcx: FunctionBuilder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx, &mut position);
         let ebb = bcx.create_ebb();
         bcx.switch_to_block(ebb);
         bcx.ins().return_(&[]);
@@ -88,8 +89,9 @@ fn switch_error() {
     let mut func = Function::with_name_signature(ExternalName::user(0, 0), sig);
 
     let mut func_ctx = FunctionBuilderContext::new();
+    let mut position = Position::default();
     {
-        let mut bcx: FunctionBuilder = FunctionBuilder::new(&mut func, &mut func_ctx);
+        let mut bcx: FunctionBuilder = FunctionBuilder::new(&mut func, &mut func_ctx, &mut position);
         let start = bcx.create_ebb();
         let bb0 = bcx.create_ebb();
         let bb1 = bcx.create_ebb();
@@ -166,8 +168,9 @@ fn libcall_function() {
     let mut ctx = Context::new();
     ctx.func = Function::with_name_signature(ExternalName::user(0, func_id.as_u32()), sig);
     let mut func_ctx = FunctionBuilderContext::new();
+    let mut position = Position::default();
     {
-        let mut bcx: FunctionBuilder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
+        let mut bcx: FunctionBuilder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx, &mut position);
         let ebb = bcx.create_ebb();
         bcx.switch_to_block(ebb);
 

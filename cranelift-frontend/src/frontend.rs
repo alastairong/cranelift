@@ -877,7 +877,7 @@ impl<'a> FunctionBuilder<'a> {
 #[cfg(test)]
 mod tests {
     use super::greatest_divisible_power_of_two;
-    use crate::frontend::{FunctionBuilder, FunctionBuilderContext};
+    use crate::frontend::{FunctionBuilder, FunctionBuilderContext, Position};
     use crate::Variable;
     use cranelift_codegen::entity::EntityRef;
     use cranelift_codegen::ir::types::*;
@@ -894,8 +894,9 @@ mod tests {
 
         let mut fn_ctx = FunctionBuilderContext::new();
         let mut func = Function::with_name_signature(ExternalName::testcase("sample"), sig);
+        let mut position = Position::default();
         {
-            let mut builder = FunctionBuilder::new(&mut func, &mut fn_ctx);
+            let mut builder = FunctionBuilder::new(&mut func, &mut fn_ctx, &mut position);
 
             let block0 = builder.create_ebb();
             let block1 = builder.create_ebb();
@@ -1010,8 +1011,9 @@ mod tests {
 
         let mut fn_ctx = FunctionBuilderContext::new();
         let mut func = Function::with_name_signature(ExternalName::testcase("sample"), sig);
+        let mut position = Position::default();
         {
-            let mut builder = FunctionBuilder::new(&mut func, &mut fn_ctx);
+            let mut builder = FunctionBuilder::new(&mut func, &mut fn_ctx, &mut position);
 
             let block0 = builder.create_ebb();
             let x = Variable::new(0);
@@ -1071,8 +1073,9 @@ ebb0:
 
         let mut fn_ctx = FunctionBuilderContext::new();
         let mut func = Function::with_name_signature(ExternalName::testcase("sample"), sig);
+        let mut position = Position::default();
         {
-            let mut builder = FunctionBuilder::new(&mut func, &mut fn_ctx);
+            let mut builder = FunctionBuilder::new(&mut func, &mut fn_ctx, &mut position);
 
             let block0 = builder.create_ebb();
             let x = Variable::new(0);
@@ -1128,8 +1131,9 @@ ebb0:
 
         let mut fn_ctx = FunctionBuilderContext::new();
         let mut func = Function::with_name_signature(ExternalName::testcase("sample"), sig);
+        let mut position = Position::default();
         {
-            let mut builder = FunctionBuilder::new(&mut func, &mut fn_ctx);
+            let mut builder = FunctionBuilder::new(&mut func, &mut fn_ctx, &mut position);
 
             let block0 = builder.create_ebb();
             let x = Variable::new(0);
@@ -1188,8 +1192,9 @@ ebb0:
 
         let mut fn_ctx = FunctionBuilderContext::new();
         let mut func = Function::with_name_signature(ExternalName::testcase("sample"), sig);
+        let mut position = Position::default();
         {
-            let mut builder = FunctionBuilder::new(&mut func, &mut fn_ctx);
+            let mut builder = FunctionBuilder::new(&mut func, &mut fn_ctx, &mut position);
 
             let block0 = builder.create_ebb();
             let y = Variable::new(16);
@@ -1240,8 +1245,9 @@ ebb0:
 
         let mut fn_ctx = FunctionBuilderContext::new();
         let mut func = Function::with_name_signature(ExternalName::testcase("sample"), sig);
+        let mut position = Position::default();
         {
-            let mut builder = FunctionBuilder::new(&mut func, &mut fn_ctx);
+            let mut builder = FunctionBuilder::new(&mut func, &mut fn_ctx, &mut position);
 
             let block0 = builder.create_ebb();
             let y = Variable::new(16);

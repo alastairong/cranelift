@@ -1,4 +1,5 @@
 use cranelift::prelude::*;
+use cranelift_frontend::Position;
 use cranelift_module::{default_libcall_names, Linkage, Module};
 use cranelift_simplejit::{SimpleJITBackend, SimpleJITBuilder};
 use std::mem;
@@ -8,6 +9,7 @@ fn main() {
         Module::new(SimpleJITBuilder::new(default_libcall_names()));
     let mut ctx = module.make_context();
     let mut func_ctx = FunctionBuilderContext::new();
+    let mut position = Position::default();
 
     let mut sig_a = module.make_signature();
     sig_a.params.push(AbiParam::new(types::I32));
@@ -26,7 +28,7 @@ fn main() {
     ctx.func.signature = sig_a;
     ctx.func.name = ExternalName::user(0, func_a.as_u32());
     {
-        let mut bcx: FunctionBuilder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
+        let mut bcx: FunctionBuilder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx, &mut position);
         let ebb = bcx.create_ebb();
 
         bcx.switch_to_block(ebb);
@@ -44,7 +46,7 @@ fn main() {
     ctx.func.signature = sig_b;
     ctx.func.name = ExternalName::user(0, func_b.as_u32());
     {
-        let mut bcx: FunctionBuilder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
+        let mut bcx: FunctionBuilder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx, &mut position);
         let ebb = bcx.create_ebb();
 
         bcx.switch_to_block(ebb);
