@@ -1,10 +1,13 @@
 # Travis CI script. See https://travis-ci.org/ for more info.
 
+os:
+    - linux
+    - osx
 language: rust
 rust:
     # The oldest version we currently support. See
     # CONTRIBUTING.md#rustc-version-support for details.
-    - 1.30.1
+    - 1.34.0
     - beta
     - nightly
 matrix:
@@ -16,15 +19,14 @@ matrix:
     # Similarly, we don't need to hold up people using stable while we wait
     # for the results which may fail.
     fast_finish: true
-dist: trusty
+dist: xenial
 sudo: false
 addons:
     apt:
         packages:
             - python3-pip
 install:
-    - pip3 install --user --upgrade mypy flake8
-    - mypy --version
+    - pip3 install --verbose --user --upgrade mypy flake8
 before_script:
     # If an old version of rustfmt from cargo is already installed, uninstall
     # it, since it can prevent the installation of the new version from rustup.

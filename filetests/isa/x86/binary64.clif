@@ -602,6 +602,17 @@ ebb0:
     [-,%r8]              v520 = ushr_imm v4, 63   ; bin: 49 c1 e8 3f
 
 
+    ; Rotate immediates
+    ; asm: rolq $12, %rsi
+    [-,%rsi]             v5101 = rotl_imm v2, 12   ; bin: 48 c1 c6 0c
+    ; asm: rolq $13, %r8
+    [-,%r8]              v5102 = rotl_imm v4, 13   ; bin: 49 c1 c0 0d
+    ; asm: rorq $32, %rsi
+    [-,%rsi]             v5103 = rotr_imm v2, 32   ; bin: 48 c1 ce 20
+    ; asm: rorq $33, %r8
+    [-,%r8]              v5104 = rotr_imm v4, 33   ; bin: 49 c1 c8 21
+
+
     ; Load Complex
     [-,%rax]            v521 = iconst.i64 1
     [-,%rbx]            v522 = iconst.i64 1
@@ -783,6 +794,9 @@ ebb1:
     trapif ugt v11, user0                          ; bin: 76 02 user0 0f 0b
     ; asm: jnbe .+4; ud2
     trapif ule v11, user0                          ; bin: 77 02 user0 0f 0b
+
+    ; Debug trap.
+    debugtrap ; bin: cc
 
     ; Stack check.
     ; asm: cmpq %rsp, %rcx
@@ -1410,8 +1424,8 @@ function %I64_JT(i64 [%rdi]) {
 ebb0(v0: i64 [%rdi]):
     ; Note: The next two lines will need to change whenever instructions are
     ;        added or removed from this test.
-    [-, %rax]           v1 = jump_table_base.i64 jt0    ; bin: 48 8d 05 00000039
-    [-, %r10]           v2 = jump_table_base.i64 jt0    ; bin: 4c 8d 15 00000032
+    [-, %rax]           v1 = jump_table_base.i64 jt0    ; bin: 48 8d 05 00000039 PCRelRodata4(jt0)
+    [-, %r10]           v2 = jump_table_base.i64 jt0    ; bin: 4c 8d 15 00000032 PCRelRodata4(jt0)
 
     [-, %rbx]           v10 = iconst.i64 1
     [-, %r13]           v11 = iconst.i64 2

@@ -1,43 +1,25 @@
 #![deny(trivial_numeric_casts)]
-#![warn(
-    unused_import_braces,
-    unstable_features,
-    unused_extern_crates
-)]
+#![warn(unused_import_braces, unstable_features, unused_extern_crates)]
 #![cfg_attr(
     feature = "cargo-clippy",
     warn(
-        float_arithmetic,
-        mut_mut,
-        nonminimal_bool,
-        option_map_unwrap_or,
-        option_map_unwrap_or_else,
-        unicode_not_nfc,
-        use_self
+        clippy::float_arithmetic,
+        clippy::mut_mut,
+        clippy::nonminimal_bool,
+        clippy::option_map_unwrap_or,
+        clippy::option_map_unwrap_or_else,
+        clippy::unicode_not_nfc,
+        clippy::use_self
     )
 )]
 
-extern crate file_per_thread_logger;
-#[macro_use]
-extern crate cfg_if;
-#[cfg(feature = "disas")]
-extern crate capstone;
-extern crate clap;
-extern crate cranelift_codegen;
-extern crate cranelift_entity;
-extern crate cranelift_filetests;
-extern crate cranelift_reader;
-extern crate pretty_env_logger;
+use cfg_if::cfg_if;
 
 cfg_if! {
     if #[cfg(feature = "wasm")] {
-        extern crate cranelift_wasm;
-        extern crate term;
-        extern crate wabt;
         mod wasm;
     }
 }
-extern crate target_lexicon;
 
 use clap::{App, Arg, SubCommand};
 use cranelift_codegen::dbg::LOG_FILENAME_PREFIX;
@@ -48,6 +30,7 @@ use std::process;
 
 mod cat;
 mod compile;
+mod disasm;
 mod print_cfg;
 mod utils;
 
@@ -85,6 +68,19 @@ fn add_time_flag<'a>() -> clap::Arg<'a, 'a> {
     Arg::with_name("time-passes")
         .short("T")
         .help("Print pass timing report for test")
+}
+
+fn add_size_flag<'a>() -> clap::Arg<'a, 'a> {
+    Arg::with_name("print-size")
+        .short("X")
+        .help("Print bytecode size")
+}
+
+fn add_disasm_flag<'a>() -> clap::Arg<'a, 'a> {
+    Arg::with_name("disasm")
+        .long("disasm")
+        .short("D")
+        .help("Print machine code disassembly")
 }
 
 fn add_set_flag<'a>() -> clap::Arg<'a, 'a> {
@@ -128,7 +124,7 @@ fn get_vec(argument_vec: Option<clap::Values>) -> Vec<String> {
 
 fn add_wasm_or_compile<'a>(cmd: &str) -> clap::App<'a, 'a> {
     let about_str = match cmd {
-        "wasm" => "Compiles Cranelift IR into target language",
+        "wasm" => "Compiles Wasm binary/text into Cranelift IR and then into target language",
         "compile" => "Compiles Cranelift IR into target language",
         _ => panic!("Invalid command"),
     };
@@ -138,6 +134,8 @@ fn add_wasm_or_compile<'a>(cmd: &str) -> clap::App<'a, 'a> {
         .arg(add_verbose_flag())
         .arg(add_print_flag())
         .arg(add_time_flag())
+        .arg(add_size_flag())
+        .arg(add_disasm_flag())
         .arg(add_set_flag())
         .arg(add_target_flag())
         .arg(add_input_file_arg())
@@ -162,26 +160,37 @@ fn main() {
                 .arg(add_time_flag())
                 .arg(add_input_file_arg())
                 .arg(add_debug_flag()),
-        ).subcommand(
+        )
+        .subcommand(
             SubCommand::with_name("cat")
                 .about("Outputs .clif file")
                 .arg(add_input_file_arg())
                 .arg(add_debug_flag()),
-        ).subcommand(
+        )
+        .subcommand(
             SubCommand::with_name("print-cfg")
                 .about("Prints out cfg in dot format")
                 .arg(add_input_file_arg())
                 .arg(add_debug_flag()),
-        ).subcommand(
+        )
+        .subcommand(
             add_wasm_or_compile("compile")
                 .arg(
                     Arg::with_name("just-decode")
                         .short("t")
                         .help("Just decode WebAssembly to Cranelift IR"),
-                ).arg(Arg::with_name("check-translation").short("c").help(
+                )
+                .arg(Arg::with_name("check-translation").short("c").help(
                     "Just checks the correctness of Cranelift IR translated from WebAssembly",
                 )),
-        ).subcommand(add_wasm_or_compile("wasm"))
+        )
+        .subcommand(
+            add_wasm_or_compile("wasm").arg(
+                Arg::with_name("value-ranges")
+                    .long("value-ranges")
+                    .help("Display values ranges and their locations"),
+            ),
+        )
         .subcommand(
             SubCommand::with_name("pass")
                 .about("Run specified pass(s) on an input file.")
@@ -203,7 +212,8 @@ fn main() {
                 rest_cmd.is_present("verbose"),
                 rest_cmd.is_present("time-passes"),
                 &get_vec(rest_cmd.values_of("file")),
-            ).map(|_time| ())
+            )
+            .map(|_time| ())
         }
         ("pass", Some(rest_cmd)) => {
             handle_debug_flag(rest_cmd.is_present("debug"));
@@ -220,7 +230,8 @@ fn main() {
                 &get_vec(rest_cmd.values_of("pass")),
                 target_val,
                 rest_cmd.value_of("single-file").unwrap(),
-            ).map(|_time| ())
+            )
+            .map(|_time| ())
         }
         ("print-cfg", Some(rest_cmd)) => {
             handle_debug_flag(rest_cmd.is_present("debug"));
@@ -237,6 +248,7 @@ fn main() {
             compile::run(
                 get_vec(rest_cmd.values_of("file")),
                 rest_cmd.is_present("print"),
+                rest_cmd.is_present("disasm"),
                 rest_cmd.is_present("time-passes"),
                 &get_vec(rest_cmd.values_of("set")),
                 target_val,
@@ -245,23 +257,27 @@ fn main() {
         ("wasm", Some(rest_cmd)) => {
             handle_debug_flag(rest_cmd.is_present("debug"));
 
-            let mut target_val: &str = "";
-            if let Some(clap_target) = rest_cmd.value_of("target") {
-                target_val = clap_target;
-            }
-
             #[cfg(feature = "wasm")]
-            let result = wasm::run(
-                get_vec(rest_cmd.values_of("file")),
-                rest_cmd.is_present("verbose"),
-                rest_cmd.is_present("just-decode"),
-                rest_cmd.is_present("check-translation"),
-                rest_cmd.is_present("print"),
-                &get_vec(rest_cmd.values_of("set")),
-                target_val,
-                rest_cmd.is_present("print-size"),
-                rest_cmd.is_present("time-passes"),
-            );
+            let result = {
+                let mut target_val: &str = "";
+                if let Some(clap_target) = rest_cmd.value_of("target") {
+                    target_val = clap_target;
+                }
+
+                wasm::run(
+                    get_vec(rest_cmd.values_of("file")),
+                    rest_cmd.is_present("verbose"),
+                    rest_cmd.is_present("just-decode"),
+                    rest_cmd.is_present("check-translation"),
+                    rest_cmd.is_present("print"),
+                    rest_cmd.is_present("disasm"),
+                    &get_vec(rest_cmd.values_of("set")),
+                    target_val,
+                    rest_cmd.is_present("print-size"),
+                    rest_cmd.is_present("time-passes"),
+                    rest_cmd.is_present("value-ranges"),
+                )
+            };
 
             #[cfg(not(feature = "wasm"))]
             let result = Err("Error: clif-util was compiled without wasm support.".to_owned());
