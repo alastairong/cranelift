@@ -257,7 +257,7 @@ pub trait FuncEnvironment {
 
 /// An object satisfying the `ModuleEnvironment` trait can be passed as argument to the
 /// [`translate_module`](fn.translate_module.html) function. These methods should not be called
-/// by the user, they are only for `cranelift-wasm` internal use.
+/// by the user, they are only for `wasmer-clif-fork-wasm` internal use.
 pub trait ModuleEnvironment<'data> {
     /// Get the information needed to produce Cranelift IR for the current target.
     fn target_config(&self) -> TargetFrontendConfig;
