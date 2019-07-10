@@ -321,6 +321,9 @@ pub trait ModuleEnvironment<'data> {
     /// Declares a global to the environment.
     fn declare_global(&mut self, global: Global);
 
+    /// Return the global for the given global index.
+    fn get_global(&self, global_index: GlobalIndex) -> &Global;
+
     /// Provides the number of exports up front. By default this does nothing, but
     /// implementations can use this to preallocate memory if desired.
     fn reserve_exports(&mut self, _num: u32) {}

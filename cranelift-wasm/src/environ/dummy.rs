@@ -403,6 +403,10 @@ impl<'data> ModuleEnvironment<'data> for DummyEnvironment {
             .push((String::from(module), String::from(field)));
     }
 
+    fn get_global(&self, global_index: GlobalIndex) -> &Global {
+        &self.info.globals[global_index].entity
+    }
+
     fn declare_table(&mut self, table: Table) {
         self.info.tables.push(Exportable::new(table));
     }
