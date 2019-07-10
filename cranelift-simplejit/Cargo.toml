@@ -1,6 +1,6 @@
 [package]
 name = "wasmer-clif-fork-simplejit"
-version = "0.34.0"
+version = "0.31.0"
 authors = ["Forked from work done by The Cranelift Project Developers"]
 description = "A simple JIT library backed by Cranelift"
 repository = "https://github.com/wasmerio/cranelift/tree/wasmer"
@@ -10,9 +10,9 @@ readme = "README.md"
 edition = "2018"
 
 [dependencies]
-cranelift-codegen = "0.34.0"
-cranelift-module = "0.34.0"
-cranelift-native = "0.34.0"
+cranelift-codegen = "0.31.0"
+cranelift-module = "0.31.0"
+cranelift-native = "0.31.0"
 region = "2.0.0"
 libc = { version = "0.2.42" }
 errno = "0.2.4"
@@ -22,9 +22,9 @@ target-lexicon = { version = "0.4.0" }
 winapi = { version = "0.3", features = ["winbase", "memoryapi"] }
 
 [dev-dependencies]
-cranelift = { version = "0.34.0" }
-wasmer-clif-fork-frontend = { path = "../cranelift-frontend", version = "0.34.0" }
-cranelift-entity = { version = "0.34.0" }
+cranelift = { version = "0.31.0" }
+wasmer-clif-fork-frontend = { path = "../cranelift-frontend", version = "0.31.0" }
+cranelift-entity = { version = "0.31.0" }
 
 [badges]
 maintenance = { status = "experimental" }

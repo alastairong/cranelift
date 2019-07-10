@@ -27,7 +27,7 @@ static _RUST_NAME_PREFIX: &'static str = "ir::types::";
 ///
 /// All SSA values have a type that is described by an instance of `ValueType`
 /// or one of its subclasses.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ValueType {
     BV(BVType),
     Lane(LaneType),
@@ -147,7 +147,7 @@ impl From<VectorType> for ValueType {
 }
 
 /// A concrete scalar type that can appear as a vector lane too.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum LaneType {
     BoolType(shared_types::Bool),
     FloatType(shared_types::Float),
@@ -327,7 +327,7 @@ impl Iterator for LaneTypeIterator {
 ///
 /// A vector type has a lane type which is an instance of `LaneType`,
 /// and a positive number of lanes.
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq)]
 pub struct VectorType {
     base: LaneType,
     lanes: u64,
@@ -393,7 +393,7 @@ impl fmt::Debug for VectorType {
 }
 
 /// A flat bitvector type. Used for semantics description only.
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq)]
 pub struct BVType {
     bits: u64,
 }

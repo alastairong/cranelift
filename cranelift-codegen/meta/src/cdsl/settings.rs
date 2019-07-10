@@ -148,14 +148,6 @@ impl SettingGroup {
         }
         panic!("Should have found bool setting by name.");
     }
-
-    pub fn predicate_by_name(&self, name: &'static str) -> SettingPredicateNumber {
-        self.predicates
-            .iter()
-            .find(|pred| pred.name == name)
-            .unwrap_or_else(|| panic!("unknown predicate {}", name))
-            .number
-    }
 }
 
 /// This is the basic information needed to track the specific parts of a setting when building
@@ -217,12 +209,10 @@ struct ProtoPredicate {
     node: PredicateNode,
 }
 
-pub type SettingPredicateNumber = u8;
-
 pub struct Predicate {
     pub name: &'static str,
     node: PredicateNode,
-    pub number: SettingPredicateNumber,
+    pub number: u8,
 }
 
 impl Predicate {

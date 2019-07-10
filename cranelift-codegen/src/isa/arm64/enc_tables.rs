@@ -1,6 +1,5 @@
 //! Encoding tables for ARM64 ISA.
 
-use crate::ir;
 use crate::isa;
 use crate::isa::constraints::*;
 use crate::isa::enc_tables::*;

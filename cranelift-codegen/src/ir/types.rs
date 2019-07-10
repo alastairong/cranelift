@@ -25,7 +25,7 @@ pub struct Type(u8);
 /// Not a valid type. Can't be loaded or stored. Can't be part of a SIMD vector.
 pub const INVALID: Type = Type(0);
 
-/// Start of the lane types. See also `meta/src/cdsl/types.rs`.
+/// Start of the lane types. See also `meta-python/cdsl/types.py`.
 const LANE_BASE: u8 = 0x70;
 
 /// Start of the 2-lane vector types.
@@ -44,15 +44,8 @@ impl Type {
         if self.0 < VECTOR_BASE {
             self
         } else {
-            Self(LANE_BASE | (self.0 & 0x0f))
+            Type(LANE_BASE | (self.0 & 0x0f))
         }
-    }
-
-    /// The type transformation that returns the lane type of a type variable; it is just a
-    /// renaming of lane_type() to be used in context where we think in terms of type variable
-    /// transformations.
-    pub fn lane_of(self) -> Self {
-        self.lane_type()
     }
 
     /// Get log_2 of the number of bits in a lane.

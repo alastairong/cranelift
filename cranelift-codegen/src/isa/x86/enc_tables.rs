@@ -6,13 +6,12 @@ use crate::cursor::{Cursor, FuncCursor};
 use crate::flowgraph::ControlFlowGraph;
 use crate::ir::condcodes::{FloatCC, IntCC};
 use crate::ir::{self, Function, Inst, InstBuilder};
+use crate::isa;
 use crate::isa::constraints::*;
 use crate::isa::enc_tables::*;
 use crate::isa::encoding::base_size;
 use crate::isa::encoding::RecipeSizing;
 use crate::isa::RegUnit;
-use crate::isa::{self, TargetIsa};
-use crate::predicates;
 use crate::regalloc::RegDiversions;
 
 include!(concat!(env!("OUT_DIR"), "/encoding-x86.rs"));
@@ -116,7 +115,7 @@ fn expand_sdivrem(
     inst: ir::Inst,
     func: &mut ir::Function,
     cfg: &mut ControlFlowGraph,
-    isa: &dyn TargetIsa,
+    isa: &dyn isa::TargetIsa,
 ) {
     let (x, y, is_srem) = match func.dfg[inst] {
         ir::InstructionData::Binary {
@@ -226,7 +225,7 @@ fn expand_udivrem(
     inst: ir::Inst,
     func: &mut ir::Function,
     _cfg: &mut ControlFlowGraph,
-    isa: &dyn TargetIsa,
+    isa: &dyn isa::TargetIsa,
 ) {
     let (x, y, is_urem) = match func.dfg[inst] {
         ir::InstructionData::Binary {
@@ -279,7 +278,7 @@ fn expand_minmax(
     inst: ir::Inst,
     func: &mut ir::Function,
     cfg: &mut ControlFlowGraph,
-    _isa: &dyn TargetIsa,
+    _isa: &dyn isa::TargetIsa,
 ) {
     let (x, y, x86_opc, bitwise_opc) = match func.dfg[inst] {
         ir::InstructionData::Binary {
@@ -371,7 +370,7 @@ fn expand_fcvt_from_uint(
     inst: ir::Inst,
     func: &mut ir::Function,
     cfg: &mut ControlFlowGraph,
-    _isa: &dyn TargetIsa,
+    _isa: &dyn isa::TargetIsa,
 ) {
     let x;
     match func.dfg[inst] {
@@ -442,7 +441,7 @@ fn expand_fcvt_to_sint(
     inst: ir::Inst,
     func: &mut ir::Function,
     cfg: &mut ControlFlowGraph,
-    _isa: &dyn TargetIsa,
+    _isa: &dyn isa::TargetIsa,
 ) {
     use crate::ir::immediates::{Ieee32, Ieee64};
 
@@ -537,7 +536,7 @@ fn expand_fcvt_to_sint_sat(
     inst: ir::Inst,
     func: &mut ir::Function,
     cfg: &mut ControlFlowGraph,
-    _isa: &dyn TargetIsa,
+    _isa: &dyn isa::TargetIsa,
 ) {
     use crate::ir::immediates::{Ieee32, Ieee64};
 
@@ -656,7 +655,7 @@ fn expand_fcvt_to_uint(
     inst: ir::Inst,
     func: &mut ir::Function,
     cfg: &mut ControlFlowGraph,
-    _isa: &dyn TargetIsa,
+    _isa: &dyn isa::TargetIsa,
 ) {
     use crate::ir::immediates::{Ieee32, Ieee64};
 
@@ -737,7 +736,7 @@ fn expand_fcvt_to_uint_sat(
     inst: ir::Inst,
     func: &mut ir::Function,
     cfg: &mut ControlFlowGraph,
-    _isa: &dyn TargetIsa,
+    _isa: &dyn isa::TargetIsa,
 ) {
     use crate::ir::immediates::{Ieee32, Ieee64};
 

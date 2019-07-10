@@ -9,14 +9,13 @@ pub mod settings;
 pub mod types;
 
 use crate::cdsl::formats::FormatRegistry;
-use crate::cdsl::instructions::{AllInstructions, InstructionGroup};
+use crate::cdsl::instructions::InstructionGroup;
 use crate::cdsl::operands::OperandKind;
 use crate::cdsl::settings::SettingGroup;
 use crate::cdsl::xform::TransformGroups;
 
 pub struct Definitions {
     pub settings: SettingGroup,
-    pub all_instructions: AllInstructions,
     pub instructions: InstructionGroup,
     pub operand_kinds: OperandKinds,
     pub format_registry: FormatRegistry,
@@ -51,22 +50,14 @@ impl OperandKinds {
 }
 
 pub fn define() -> Definitions {
-    let mut all_instructions = AllInstructions::new();
-
     let immediates = OperandKinds(immediates::define());
     let entities = OperandKinds(entities::define());
     let format_registry = formats::define(&immediates, &entities);
-    let instructions = instructions::define(
-        &mut all_instructions,
-        &format_registry,
-        &immediates,
-        &entities,
-    );
+    let instructions = instructions::define(&format_registry, &immediates, &entities);
     let transform_groups = legalize::define(&instructions, &immediates);
 
     Definitions {
         settings: settings::define(),
-        all_instructions,
         instructions,
         operand_kinds: immediates,
         format_registry,
