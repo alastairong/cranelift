@@ -1,6 +1,6 @@
 [package]
 name = "wasmer-clif-fork-simplejit"
-version = "0.31.0"
+version = "0.31.1"
 authors = ["Forked from work done by The Cranelift Project Developers"]
 description = "A simple JIT library backed by Cranelift"
 repository = "https://github.com/wasmerio/cranelift/tree/wasmer"
