@@ -1,6 +1,6 @@
 [package]
 name = "wasmer-clif-fork-wasm"
-version = "0.31.1"
+version = "0.32.0"
 authors = ["Forked from work done by The Cranelift Project Developers"]
 description = "Translator from WebAssembly to Cranelift IR"
 repository = "https://github.com/wasmerio/cranelift/tree/wasmer"
