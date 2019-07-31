@@ -889,7 +889,8 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
         | Operator::I32AtomicRmw16UCmpxchg { .. }
         | Operator::I64AtomicRmw8UCmpxchg { .. }
         | Operator::I64AtomicRmw16UCmpxchg { .. }
-        | Operator::I64AtomicRmw32UCmpxchg { .. } => {
+        | Operator::I64AtomicRmw32UCmpxchg { .. }
+        | Operator::Fence { .. } => {
             return Err(WasmError::Unsupported("proposed thread operators"));
         }
         Operator::RefNull | Operator::RefIsNull { .. } => {
