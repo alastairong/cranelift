@@ -11,8 +11,8 @@ use crate::translation_utils::get_vmctx_value_label;
 use cranelift_codegen::entity::EntityRef;
 use cranelift_codegen::ir::{self, Ebb, InstBuilder, ValueLabel};
 use cranelift_codegen::timing;
-use wasmer_clif_fork_frontend::{FunctionBuilder, FunctionBuilderContext, Position, Variable};
 use log::info;
+use wasmer_clif_fork_frontend::{FunctionBuilder, FunctionBuilderContext, Position, Variable};
 use wasmparser::{self, BinaryReader};
 
 /// WebAssembly to Cranelift IR function translator.
