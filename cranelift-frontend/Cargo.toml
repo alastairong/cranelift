@@ -1,7 +1,7 @@
 [package]
 authors = ["Forked from work done by The Cranelift Project Developers"]
 name = "wasmer-clif-fork-frontend"
-version = "0.32.0"
+version = "0.33.0"
 description = "Cranelift IR builder helper"
 license = "Apache-2.0 WITH LLVM-exception"
 documentation = "https://cranelift.readthedocs.io/"
