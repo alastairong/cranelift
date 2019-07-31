@@ -23,7 +23,7 @@ winapi = { version = "0.3", features = ["winbase", "memoryapi"] }
 
 [dev-dependencies]
 cranelift = { version = "0.31.0" }
-wasmer-clif-fork-frontend = { path = "../cranelift-frontend", version = "0.31.0" }
+wasmer-clif-fork-frontend = { path = "../cranelift-frontend", version = "0.33.0" }
 cranelift-entity = { version = "0.31.0" }
 
 [badges]
