@@ -23,7 +23,8 @@ use wasmparser::{self, BinaryReader};
 /// functions which will reduce heap allocation traffic.
 pub struct FuncTranslator {
     builder: FunctionBuilder,
-    state: TranslationState,
+    /// Translation state
+    pub state: TranslationState,
 }
 
 impl FuncTranslator {
@@ -166,7 +167,7 @@ fn parse_local_decls<FE: FuncEnvironment + ?Sized>(
 /// Declare `count` local variables of the same type, starting from `next_local`.
 ///
 /// Fail of too many locals are declared in the function, or if the type is not valid for a local.
-fn declare_locals<FE: FuncEnvironment + ?Sized>(
+pub fn declare_locals<FE: FuncEnvironment + ?Sized>(
     builder: &mut FunctionBuilder,
     count: u32,
     wasm_type: wasmparser::Type,
