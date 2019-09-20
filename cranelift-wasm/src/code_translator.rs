@@ -81,7 +81,7 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
          *  `get_global` and `set_global` are handled by the environment.
          ***********************************************************************************/
         Operator::GetGlobal { global_index } => {
-            let val = match state.get_global(&mut builder.func, *global_index, environ)? {
+            let val = match state.get_global(builder.func, *global_index, environ)? {
                 GlobalVariable::Const(val) => val,
                 GlobalVariable::Memory { gv, offset, ty } => {
                     let addr = builder.ins().global_value(environ.pointer_type(), gv);
@@ -92,7 +92,7 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
             state.push1(val);
         }
         Operator::SetGlobal { global_index } => {
-            match state.get_global(&mut builder.func, *global_index, environ)? {
+            match state.get_global(builder.func, *global_index, environ)? {
                 GlobalVariable::Const(_) => panic!("global #{} is a constant", *global_index),
                 GlobalVariable::Memory { gv, offset, ty } => {
                     let addr = builder.ins().global_value(environ.pointer_type(), gv);
@@ -367,8 +367,7 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
          * argument referring to an index in the external functions table of the module.
          ************************************************************************************/
         Operator::Call { function_index } => {
-            let (fref, num_args) =
-                state.get_direct_func(&mut builder.func, *function_index, environ)?;
+            let (fref, num_args) = state.get_direct_func(builder.func, *function_index, environ)?;
             let call = environ.translate_call(
                 builder.cursor(),
                 FuncIndex::from_u32(*function_index),
@@ -389,8 +388,8 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
         Operator::CallIndirect { index, table_index } => {
             // `index` is the index of the function's signature and `table_index` is the index of
             // the table to search the function in.
-            let (sigref, num_args) = state.get_indirect_sig(&mut builder.func, *index, environ)?;
-            let table = state.get_table(&mut builder.func, *table_index, environ)?;
+            let (sigref, num_args) = state.get_indirect_sig(builder.func, *index, environ)?;
+            let table = state.get_table(builder.func, *table_index, environ)?;
             let callee = state.pop1();
             let call = environ.translate_call_indirect(
                 builder.cursor(),
@@ -418,13 +417,13 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
             // The WebAssembly MVP only supports one linear memory, but we expect the reserved
             // argument to be a memory index.
             let heap_index = MemoryIndex::from_u32(*reserved);
-            let heap = state.get_heap(&mut builder.func, *reserved, environ)?;
+            let heap = state.get_heap(builder.func, *reserved, environ)?;
             let val = state.pop1();
             state.push1(environ.translate_memory_grow(builder.cursor(), heap_index, heap, val)?)
         }
         Operator::MemorySize { reserved } => {
             let heap_index = MemoryIndex::from_u32(*reserved);
-            let heap = state.get_heap(&mut builder.func, *reserved, environ)?;
+            let heap = state.get_heap(builder.func, *reserved, environ)?;
             state.push1(environ.translate_memory_size(builder.cursor(), heap_index, heap)?);
         }
         /******************************* Load instructions ***********************************
@@ -975,9 +974,24 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
                 builder,
             ))
         }
+        Operator::V8x16Shuffle { lanes, .. } => {
+            let (vector_a, vector_b) = state.pop2();
+            let a = optionally_bitcast_vector(vector_a, I8X16, builder);
+            let b = optionally_bitcast_vector(vector_b, I8X16, builder);
+            let mask = builder.func.dfg.immediates.push(lanes.to_vec());
+            let shuffled = builder.ins().shuffle(a, b, mask);
+            state.push1(shuffled)
+            // At this point the original types of a and b are lost; users of this value (i.e. this
+            // WASM-to-CLIF translator) may need to raw_bitcast for type-correctness. This is due
+            // to WASM using the less specific v128 type for certain operations and more specific
+            // types (e.g. i8x16) for others.
+        }
+        Operator::I8x16Add | Operator::I16x8Add | Operator::I32x4Add | Operator::I64x2Add => {
+            let (a, b) = state.pop2();
+            state.push1(builder.ins().iadd(a, b))
+        }
         Operator::V128Load { .. }
         | Operator::V128Store { .. }
-        | Operator::V8x16Shuffle { .. }
         | Operator::I8x16Eq
         | Operator::I8x16Ne
         | Operator::I8x16LtS
@@ -1031,7 +1045,6 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
         | Operator::I8x16Shl
         | Operator::I8x16ShrS
         | Operator::I8x16ShrU
-        | Operator::I8x16Add
         | Operator::I8x16AddSaturateS
         | Operator::I8x16AddSaturateU
         | Operator::I8x16Sub
@@ -1044,7 +1057,6 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
         | Operator::I16x8Shl
         | Operator::I16x8ShrS
         | Operator::I16x8ShrU
-        | Operator::I16x8Add
         | Operator::I16x8AddSaturateS
         | Operator::I16x8AddSaturateU
         | Operator::I16x8Sub
@@ -1057,7 +1069,6 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
         | Operator::I32x4Shl
         | Operator::I32x4ShrS
         | Operator::I32x4ShrU
-        | Operator::I32x4Add
         | Operator::I32x4Sub
         | Operator::I32x4Mul
         | Operator::I64x2Neg
@@ -1066,7 +1077,6 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
         | Operator::I64x2Shl
         | Operator::I64x2ShrS
         | Operator::I64x2ShrU
-        | Operator::I64x2Add
         | Operator::I64x2Sub
         | Operator::F32x4Abs
         | Operator::F32x4Neg
@@ -1238,7 +1248,7 @@ fn translate_load<FE: FuncEnvironment + ?Sized>(
 ) -> WasmResult<()> {
     let addr32 = state.pop1();
     // We don't yet support multiple linear memories.
-    let heap = state.get_heap(&mut builder.func, 0, environ)?;
+    let heap = state.get_heap(builder.func, 0, environ)?;
     let (base, offset) = get_heap_addr(heap, addr32, offset, environ.pointer_type(), builder);
     // Note that we don't set `is_aligned` here, even if the load instruction's
     // alignment immediate says it's aligned, because WebAssembly's immediate
@@ -1263,7 +1273,7 @@ fn translate_store<FE: FuncEnvironment + ?Sized>(
     let val_ty = builder.func.dfg.value_type(val);
 
     // We don't yet support multiple linear memories.
-    let heap = state.get_heap(&mut builder.func, 0, environ)?;
+    let heap = state.get_heap(builder.func, 0, environ)?;
     let (base, offset) = get_heap_addr(heap, addr32, offset, environ.pointer_type(), builder);
     // See the comments in `translate_load` about the flags.
     let flags = MemFlags::new();

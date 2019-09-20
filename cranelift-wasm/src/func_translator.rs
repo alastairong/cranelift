@@ -12,7 +12,7 @@ use crate::wasm_unsupported;
 use cranelift_codegen::entity::EntityRef;
 use cranelift_codegen::ir::{self, Ebb, InstBuilder, ValueLabel};
 use cranelift_codegen::timing;
-use cranelift_frontend::{FunctionBuilder, Variable};
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use log::info;
 use wasmparser::{self, BinaryReader};
 
@@ -22,8 +22,8 @@ use wasmparser::{self, BinaryReader};
 /// by a `FuncEnvironment` object. A single translator instance can be reused to translate multiple
 /// functions which will reduce heap allocation traffic.
 pub struct FuncTranslator {
-    builder: FunctionBuilder,
-    /// Translation state
+    func_ctx: FunctionBuilderContext,
+        /// Translation state
     pub state: TranslationState,
 }
 
@@ -31,7 +31,7 @@ impl FuncTranslator {
     /// Create a new translator.
     pub fn new() -> Self {
         Self {
-            builder: FunctionBuilder::new(ir::Function::new()),
+            func_ctx: FunctionBuilderContext::new(),
             state: TranslationState::new(),
         }
     }
@@ -58,9 +58,9 @@ impl FuncTranslator {
         &mut self,
         code: &[u8],
         code_offset: usize,
-        func: ir::Function,
+        func: &mut ir::Function,
         environ: &mut FE,
-    ) -> WasmResult<ir::Function> {
+    ) -> WasmResult<()> {
         self.translate_from_reader(
             BinaryReader::new_with_offset(code, code_offset),
             func,
@@ -72,9 +72,9 @@ impl FuncTranslator {
     pub fn translate_from_reader<FE: FuncEnvironment + ?Sized>(
         &mut self,
         mut reader: BinaryReader,
-        func: ir::Function,
+        func: &mut ir::Function,
         environ: &mut FE,
-    ) -> WasmResult<ir::Function> {
+    ) -> WasmResult<()> {
         let _tt = timing::wasm_translate_function();
         info!(
             "translate({} bytes, {}{})",
@@ -85,32 +85,31 @@ impl FuncTranslator {
         debug_assert_eq!(func.dfg.num_ebbs(), 0, "Function must be empty");
         debug_assert_eq!(func.dfg.num_insts(), 0, "Function must be empty");
 
-        self.builder.func = func;
-        self.builder.set_srcloc(cur_srcloc(&reader));
-        let entry_block = self.builder.create_ebb();
-        self.builder
-            .append_ebb_params_for_function_params(entry_block);
-        self.builder.switch_to_block(entry_block); // This also creates values for the arguments.
-        self.builder.seal_block(entry_block); // Declare all predecessors known.
+        // This clears the `FunctionBuilderContext`.
+        let mut builder = FunctionBuilder::new(func, &mut self.func_ctx);
+        builder.set_srcloc(cur_srcloc(&reader));
+        let entry_block = builder.create_ebb();
+        builder.append_ebb_params_for_function_params(entry_block);
+        builder.switch_to_block(entry_block); // This also creates values for the arguments.
+        builder.seal_block(entry_block); // Declare all predecessors known.
 
         // Make sure the entry block is inserted in the layout before we make any callbacks to
         // `environ`. The callback functions may need to insert things in the entry block.
-        self.builder.ensure_inserted_ebb();
+        builder.ensure_inserted_ebb();
 
-        let num_params = declare_wasm_parameters(&mut self.builder, entry_block);
+        let num_params = declare_wasm_parameters(&mut builder, entry_block);
 
         // Set up the translation state with a single pushed control block representing the whole
         // function and its return values.
-        let exit_block = self.builder.create_ebb();
-        self.builder
-            .append_ebb_params_for_function_returns(exit_block);
-        self.state
-            .initialize(&self.builder.func.signature, exit_block);
+        let exit_block = builder.create_ebb();
+        builder.append_ebb_params_for_function_returns(exit_block);
+        self.state.initialize(&builder.func.signature, exit_block);
 
-        parse_local_decls(&mut reader, &mut self.builder, num_params, environ)?;
-        parse_function_body(reader, &mut self.builder, &mut self.state, environ)?;
+        parse_local_decls(&mut reader, &mut builder, num_params, environ)?;
+        parse_function_body(reader, &mut builder, &mut self.state, environ)?;
 
-        Ok(self.builder.finalize())
+        builder.finalize();
+        Ok(())
     }
 }
 
@@ -181,6 +180,10 @@ pub fn declare_locals<FE: FuncEnvironment + ?Sized>(
         I64 => builder.ins().iconst(ir::types::I64, 0),
         F32 => builder.ins().f32const(ir::immediates::Ieee32::with_bits(0)),
         F64 => builder.ins().f64const(ir::immediates::Ieee64::with_bits(0)),
+        V128 => {
+            let constant_handle = builder.func.dfg.constants.insert([0; 16].to_vec());
+            builder.ins().vconst(ir::types::I8X16, constant_handle)
+        }
         AnyRef => builder.ins().null(environ.reference_type()),
         ty => wasm_unsupported!("unsupported local type {:?}", ty),
     };
@@ -290,8 +293,8 @@ mod tests {
         ctx.func.signature.params.push(ir::AbiParam::new(I32));
         ctx.func.signature.returns.push(ir::AbiParam::new(I32));
 
-        ctx.func = trans
-            .translate(&BODY, 0, ctx.func, &mut runtime.func_env())
+        trans
+            .translate(&BODY, 0, &mut ctx.func, &mut runtime.func_env())
             .unwrap();
         debug!("{}", ctx.func.display(None));
         ctx.verify(&flags).unwrap();
@@ -329,8 +332,8 @@ mod tests {
         ctx.func.signature.params.push(ir::AbiParam::new(I32));
         ctx.func.signature.returns.push(ir::AbiParam::new(I32));
 
-        ctx.func = trans
-            .translate(&BODY, 0, ctx.func, &mut runtime.func_env())
+        trans
+            .translate(&BODY, 0, &mut ctx.func, &mut runtime.func_env())
             .unwrap();
         debug!("{}", ctx.func.display(None));
         ctx.verify(&flags).unwrap();
@@ -376,8 +379,8 @@ mod tests {
         ctx.func.name = ir::ExternalName::testcase("infloop");
         ctx.func.signature.returns.push(ir::AbiParam::new(I32));
 
-        ctx.func = trans
-            .translate(&BODY, 0, ctx.func, &mut runtime.func_env())
+        trans
+            .translate(&BODY, 0, &mut ctx.func, &mut runtime.func_env())
             .unwrap();
         debug!("{}", ctx.func.display(None));
         ctx.verify(&flags).unwrap();
