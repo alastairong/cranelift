@@ -468,6 +468,16 @@ impl<'a> Verifier<'a> {
         Ok(())
     }
 
+    /// Check that the given EBB can be encoded as a BB, by checking that only
+    /// branching instructions are ending the EBB.
+    #[cfg(feature = "basic-blocks")]
+    fn encodable_as_bb(&self, ebb: Ebb, errors: &mut VerifierErrors) -> VerifierStepResult<()> {
+        match self.func.is_ebb_basic(ebb) {
+            Ok(()) => Ok(()),
+            Err((inst, message)) => fatal!(errors, inst, message),
+        }
+    }
+
     fn ebb_integrity(
         &self,
         ebb: Ebb,
@@ -666,6 +676,33 @@ impl<'a> Verifier<'a> {
                 self.verify_value_list(inst, args, errors)?;
             }
 
+            NullAry {
+                opcode: Opcode::GetPinnedReg,
+            }
+            | Unary {
+                opcode: Opcode::SetPinnedReg,
+                ..
+            } => {
+                if let Some(isa) = &self.isa {
+                    if !isa.flags().enable_pinned_reg() {
+                        return fatal!(
+                            errors,
+                            inst,
+                            "GetPinnedReg/SetPinnedReg cannot be used without enable_pinned_reg"
+                        );
+                    }
+                } else {
+                    return fatal!(errors, inst, "GetPinnedReg/SetPinnedReg need an ISA!");
+                }
+            }
+
+            Unary {
+                opcode: Opcode::Bitcast,
+                arg,
+            } => {
+                self.verify_bitcast(inst, arg, errors)?;
+            }
+
             // Exhaustive list so we can't forget to add new formats
             Unary { .. }
             | UnaryImm { .. }
@@ -677,6 +714,8 @@ impl<'a> Verifier<'a> {
             | Ternary { .. }
             | InsertLane { .. }
             | ExtractLane { .. }
+            | UnaryConst { .. }
+            | Shuffle { .. }
             | IntCompare { .. }
             | IntCompareImm { .. }
             | IntCond { .. }
@@ -687,6 +726,7 @@ impl<'a> Verifier<'a> {
             | Store { .. }
             | RegMove { .. }
             | CopySpecial { .. }
+            | CopyToSsa { .. }
             | Trap { .. }
             | CondTrap { .. }
             | IntCondTrap { .. }
@@ -946,6 +986,28 @@ impl<'a> Verifier<'a> {
                 "instruction result {} is not defined by the instruction",
                 v
             ),
+        }
+    }
+
+    fn verify_bitcast(
+        &self,
+        inst: Inst,
+        arg: Value,
+        errors: &mut VerifierErrors,
+    ) -> VerifierStepResult<()> {
+        let typ = self.func.dfg.ctrl_typevar(inst);
+        let value_type = self.func.dfg.value_type(arg);
+
+        if typ.lane_bits() < value_type.lane_bits() {
+            fatal!(
+                errors,
+                inst,
+                "The bitcast argument {} doesn't fit in a type of {} bits",
+                arg,
+                typ.lane_bits()
+            )
+        } else {
+            Ok(())
         }
     }
 
@@ -1662,9 +1724,12 @@ impl<'a> Verifier<'a> {
         // Instructions with side effects are not allowed to be ghost instructions.
         let opcode = self.func.dfg[inst].opcode();
 
-        // The `fallthrough` and `fallthrough_return` instructions are marked as terminators and
-        // branches, but they are not required to have an encoding.
-        if opcode == Opcode::Fallthrough || opcode == Opcode::FallthroughReturn {
+        // The `fallthrough`, `fallthrough_return`, and `safepoint` instructions are not required
+        // to have an encoding.
+        if opcode == Opcode::Fallthrough
+            || opcode == Opcode::FallthroughReturn
+            || opcode == Opcode::Safepoint
+        {
             return Ok(());
         }
 
@@ -1711,19 +1776,101 @@ impl<'a> Verifier<'a> {
     ) -> VerifierStepResult<()> {
         let inst_data = &self.func.dfg[inst];
 
-        // If this is some sort of a store instruction, get the memflags, else, just return.
-        let memflags = match *inst_data {
+        match *inst_data {
             ir::InstructionData::Store { flags, .. }
-            | ir::InstructionData::StoreComplex { flags, .. } => flags,
-            _ => return Ok(()),
-        };
+            | ir::InstructionData::StoreComplex { flags, .. } => {
+                if flags.readonly() {
+                    fatal!(
+                        errors,
+                        inst,
+                        "A store instruction cannot have the `readonly` MemFlag"
+                    )
+                } else {
+                    Ok(())
+                }
+            }
+            ir::InstructionData::ExtractLane {
+                opcode: ir::instructions::Opcode::Extractlane,
+                lane,
+                arg,
+                ..
+            }
+            | ir::InstructionData::InsertLane {
+                opcode: ir::instructions::Opcode::Insertlane,
+                lane,
+                args: [arg, _],
+                ..
+            } => {
+                // We must be specific about the opcodes above because other instructions are using
+                // the ExtractLane/InsertLane formats.
+                let ty = self.func.dfg.value_type(arg);
+                if u16::from(lane) >= ty.lane_count() {
+                    fatal!(
+                        errors,
+                        inst,
+                        "The lane {} does not index into the type {}",
+                        lane,
+                        ty
+                    )
+                } else {
+                    Ok(())
+                }
+            }
+            _ => Ok(()),
+        }
+    }
 
-        if memflags.readonly() {
-            fatal!(
-                errors,
-                inst,
-                "A store instruction cannot have the `readonly` MemFlag"
-            )
+    fn verify_safepoint_unused(
+        &self,
+        inst: Inst,
+        errors: &mut VerifierErrors,
+    ) -> VerifierStepResult<()> {
+        if let Some(isa) = self.isa {
+            if !isa.flags().enable_safepoints() && self.func.dfg[inst].opcode() == Opcode::Safepoint
+            {
+                return fatal!(
+                    errors,
+                    inst,
+                    "safepoint instruction cannot be used when it is not enabled."
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn typecheck_function_signature(&self, errors: &mut VerifierErrors) -> VerifierStepResult<()> {
+        self.func
+            .signature
+            .params
+            .iter()
+            .enumerate()
+            .filter(|(_, &param)| param.value_type == types::INVALID)
+            .for_each(|(i, _)| {
+                report!(
+                    errors,
+                    AnyEntity::Function,
+                    "Parameter at position {} has an invalid type",
+                    i
+                );
+            });
+
+        self.func
+            .signature
+            .returns
+            .iter()
+            .enumerate()
+            .filter(|(_, &ret)| ret.value_type == types::INVALID)
+            .for_each(|(i, _)| {
+                report!(
+                    errors,
+                    AnyEntity::Function,
+                    "Return value at position {} has an invalid type",
+                    i
+                )
+            });
+
+        if errors.has_error() {
+            Err(())
         } else {
             Ok(())
         }
@@ -1735,15 +1882,20 @@ impl<'a> Verifier<'a> {
         self.verify_tables(errors)?;
         self.verify_jump_tables(errors)?;
         self.typecheck_entry_block_params(errors)?;
+        self.typecheck_function_signature(errors)?;
 
         for ebb in self.func.layout.ebbs() {
             for inst in self.func.layout.ebb_insts(ebb) {
                 self.ebb_integrity(ebb, inst, errors)?;
                 self.instruction_integrity(inst, errors)?;
+                self.verify_safepoint_unused(inst, errors)?;
                 self.typecheck(inst, errors)?;
                 self.verify_encoding(inst, errors)?;
                 self.immediate_constraints(inst, errors)?;
             }
+
+            #[cfg(feature = "basic-blocks")]
+            self.encodable_as_bb(ebb, errors)?;
         }
 
         verify_flags(self.func, &self.expected_cfg, self.isa, errors)?;
@@ -1757,7 +1909,7 @@ mod tests {
     use super::{Verifier, VerifierError, VerifierErrors};
     use crate::entity::EntityList;
     use crate::ir::instructions::{InstructionData, Opcode};
-    use crate::ir::Function;
+    use crate::ir::{types, AbiParam, Function};
     use crate::settings;
 
     macro_rules! assert_err_with_msg {
@@ -1815,5 +1967,31 @@ mod tests {
         let _ = verifier.run(&mut errors);
 
         assert_err_with_msg!(errors, "instruction format");
+    }
+
+    #[test]
+    fn test_function_invalid_param() {
+        let mut func = Function::new();
+        func.signature.params.push(AbiParam::new(types::INVALID));
+
+        let mut errors = VerifierErrors::default();
+        let flags = &settings::Flags::new(settings::builder());
+        let verifier = Verifier::new(&func, flags.into());
+
+        let _ = verifier.typecheck_function_signature(&mut errors);
+        assert_err_with_msg!(errors, "Parameter at position 0 has an invalid type");
+    }
+
+    #[test]
+    fn test_function_invalid_return_value() {
+        let mut func = Function::new();
+        func.signature.returns.push(AbiParam::new(types::INVALID));
+
+        let mut errors = VerifierErrors::default();
+        let flags = &settings::Flags::new(settings::builder());
+        let verifier = Verifier::new(&func, flags.into());
+
+        let _ = verifier.typecheck_function_signature(&mut errors);
+        assert_err_with_msg!(errors, "Return value at position 0 has an invalid type");
     }
 }
