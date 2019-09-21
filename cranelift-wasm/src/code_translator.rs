@@ -1103,6 +1103,11 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
         | Operator::F32x4ConvertSI32x4
         | Operator::F32x4ConvertUI32x4
         | Operator::F64x2ConvertSI64x2
+        | Operator::F64x2ConvertUI64x2 { .. }
+        | Operator::V8x16Swizzle
+        | Operator::I8x16LoadSplat { .. }
+        | Operator::I16x8LoadSplat { .. }
+        | Operator::I32x4LoadSplat { .. }
         | Operator::I64x2LoadSplat { .. } => {
             wasm_unsupported!("proposed SIMD operator {:?}", op);
         }

@@ -57,7 +57,7 @@ struct EbbData {
 
 /// Position
 #[derive(Default)]
-struct Position {
+pub struct Position {
     ebb: PackedOption<Ebb>,
     basic_block: PackedOption<Block>,
 }
