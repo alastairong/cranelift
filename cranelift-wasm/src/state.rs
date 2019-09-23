@@ -124,17 +124,41 @@ impl ControlStackFrame {
     }
 }
 
+/// VisibleTranslationState wraps a TranslationState with an interface appropriate for users
+/// outside this `cranelift-wasm`.
+///
+/// VisibleTranslationState is currently very minimal (only exposing reachability information), but
+/// is anticipated to grow in the future, with functions to inspect or modify the wasm operand
+/// stack for example.
+pub struct VisibleTranslationState<'a> {
+    state: &'a TranslationState,
+}
+
+impl<'a> VisibleTranslationState<'a> {
+    /// Build a VisibleTranslationState from an existing TranslationState
+    pub fn new(state: &'a TranslationState) -> Self {
+        VisibleTranslationState { state }
+    }
+
+    /// True if the current translation state expresses reachable code, false if it is unreachable
+    pub fn reachable(&self) -> bool {
+        self.state.reachable
+    }
+}
+
 /// Contains information passed along during the translation and that records:
 ///
 /// - The current value and control stacks.
 /// - The depth of the two unreachable control blocks stacks, that are manipulated when translating
 ///   unreachable code;
 pub struct TranslationState {
-    /// Stack
+    /// A stack of values corresponding to the active values in the input wasm function at this
+    /// point.
     pub stack: Vec<Value>,
-    /// Control stack
+    /// A stack of active control flow operations at this point in the input wasm function.
     pub control_stack: Vec<ControlStackFrame>,
-    /// Reachability
+    /// Is the current translation state still reachable? This is false when translating operators
+    /// like End, Return, or Unreachable.
     pub reachable: bool,
 
     // Map of global variables that have already been created by `FuncEnvironment::make_global`.
@@ -158,7 +182,7 @@ pub struct TranslationState {
 }
 
 impl TranslationState {
-    /// New TranslationState
+    /// Construct a new, empty, `TranslationState`
     pub fn new() -> Self {
         Self {
             stack: Vec::new(),

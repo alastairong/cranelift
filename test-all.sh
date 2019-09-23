@@ -4,7 +4,6 @@ set -euo pipefail
 # This is the top-level test script:
 #
 # - Check code formatting.
-# - Perform checks on Python code.
 # - Make a debug build.
 # - Make a release build.
 # - Run unit tests for all Rust crates (including the filetests)
@@ -12,10 +11,6 @@ set -euo pipefail
 # - Optionally, run fuzzing.
 #
 # All tests run by this script should be passing at all times.
-
-# Disable generation of .pyc files because they cause trouble for vendoring
-# scripts, and this is a build step that isn't run very often anyway.
-export PYTHONDONTWRITEBYTECODE=1
 
 # Repository top-level directory.
 topdir=$(dirname "$0")
@@ -40,20 +35,6 @@ else
     echo "https://github.com/rust-lang-nursery/rustfmt for more information."
 fi
 
-# Check if any Python files have changed since we last checked them.
-tsfile="$topdir/target/meta-checked"
-meta_python="$topdir/cranelift-codegen/meta-python"
-if [ -f "$tsfile" ]; then
-    needcheck=$(find "$meta_python" -name '*.py' -newer "$tsfile")
-else
-    needcheck=yes
-fi
-if [ -n "$needcheck" ]; then
-    banner "Checking python source files"
-    "$meta_python/check.sh"
-    touch "$tsfile" || echo no target directory
-fi
-
 # Make sure the code builds in release mode.
 banner "Rust release build"
 cargo build --release
@@ -66,21 +47,44 @@ cargo build
 banner "Rust unit tests"
 RUST_BACKTRACE=1 cargo test --all
 
+has_toolchain() {
+    rustup toolchain list | grep -q $1
+}
+
+ensure_installed() {
+    program="$1"
+    toolchain="${2:-stable}"
+    if has_toolchain $toolchain; then
+        if grep -q $program <(cargo +$toolchain install --list); then
+            echo "$program found"
+        else
+            echo "installing $program"
+            cargo +$toolchain install $program
+        fi
+    else
+        return 1
+    fi
+}
+
 # Make sure the documentation builds.
 banner "Rust documentation: $topdir/target/doc/cranelift/index.html"
-cargo doc
+if has_toolchain nightly; then
+    cargo +nightly doc
+
+    # Make sure the documentation doesn't have broken links.
+    banner "Rust documentation link test"
+    ensure_installed cargo-deadlinks
+    find ./target/doc -maxdepth 1 -type d -name "cranelift*" | xargs -I{} cargo deadlinks --dir {}
+else
+    cargo doc
+    echo "nightly toolchain not found, some documentation links will not work"
+fi
 
 # Ensure fuzzer works by running it with a single input
 # Note LSAN is disabled due to https://github.com/google/sanitizers/issues/764
 banner "cargo fuzz check"
-if rustup toolchain list | grep -q nightly; then
-    if cargo install --list | grep -q cargo-fuzz; then
-        echo "cargo-fuzz found"
-    else
-        echo "installing cargo-fuzz"
-        cargo +nightly install cargo-fuzz
-    fi
 
+if ensure_installed cargo-fuzz nightly; then
     fuzz_module="ffaefab69523eb11935a9b420d58826c8ea65c4c"
     ASAN_OPTIONS=detect_leaks=0 \
     cargo +nightly fuzz run fuzz_translate_module \

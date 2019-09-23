@@ -8,10 +8,10 @@ use cranelift_entity::{entity_impl, PrimaryMap};
 
 use std::fmt;
 
+#[derive(Debug)]
 pub enum Expr {
     Var(VarIndex),
     Literal(Literal),
-    Apply(Apply),
 }
 
 impl Expr {
@@ -39,7 +39,6 @@ impl Expr {
         match self {
             Expr::Var(var_index) => var_pool.get(*var_index).to_rust_code(),
             Expr::Literal(literal) => literal.to_rust_code(),
-            Expr::Apply(a) => a.to_rust_code(var_pool),
         }
     }
 }
@@ -80,9 +79,6 @@ impl DefPool {
     }
     pub fn get(&self, index: DefIndex) -> &Def {
         self.pool.get(index).unwrap()
-    }
-    pub fn get_mut(&mut self, index: DefIndex) -> &mut Def {
-        self.pool.get_mut(index).unwrap()
     }
     pub fn next_index(&self) -> DefIndex {
         self.pool.next_key()
@@ -368,6 +364,7 @@ impl VarPool {
 ///
 /// An `Apply` AST expression is created by using function call syntax on instructions. This
 /// applies to both bound and unbound polymorphic instructions.
+#[derive(Debug)]
 pub struct Apply {
     pub inst: Instruction,
     pub args: Vec<Expr>,
@@ -376,10 +373,16 @@ pub struct Apply {
 
 impl Apply {
     pub fn new(target: InstSpec, args: Vec<Expr>) -> Self {
-        let (inst, value_types) = match target.into() {
+        let (inst, value_types) = match target {
             InstSpec::Inst(inst) => (inst, Vec::new()),
             InstSpec::Bound(bound_inst) => (bound_inst.inst, bound_inst.value_types),
         };
+
+        // Apply should only operate on concrete value types, not "any".
+        let value_types = value_types
+            .into_iter()
+            .map(|vt| vt.expect("shouldn't be Any"))
+            .collect();
 
         // Basic check on number of arguments.
         assert!(
@@ -424,17 +427,7 @@ impl Apply {
         format!("{}({})", inst_name, args)
     }
 
-    fn to_rust_code(&self, var_pool: &VarPool) -> String {
-        let args = self
-            .args
-            .iter()
-            .map(|arg| arg.to_rust_code(var_pool))
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("{}({})", self.inst.name, args)
-    }
-
-    fn inst_predicate(
+    pub fn inst_predicate(
         &self,
         format_registry: &FormatRegistry,
         var_pool: &VarPool,
@@ -448,7 +441,8 @@ impl Apply {
                 // Ignore free variables for now.
                 continue;
             }
-            pred = pred.and(InstructionPredicate::new_is_field_equal(
+            pred = pred.and(InstructionPredicate::new_is_field_equal_ast(
+                iform,
                 &format_field,
                 arg.to_rust_code(var_pool),
             ));

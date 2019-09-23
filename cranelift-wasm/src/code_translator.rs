@@ -23,16 +23,17 @@
 //! That is why `translate_function_body` takes an object having the `WasmRuntime` trait as
 //! argument.
 use super::{hash_map, HashMap};
-use crate::environ::{FuncEnvironment, GlobalVariable, ReturnMode, WasmError, WasmResult};
+use crate::environ::{FuncEnvironment, GlobalVariable, ReturnMode, WasmResult};
 use crate::state::{ControlStackFrame, TranslationState};
 use crate::translation_utils::{
     blocktype_to_type, f32_translation, f64_translation, num_return_values,
 };
 use crate::translation_utils::{FuncIndex, MemoryIndex, SignatureIndex, TableIndex};
+use crate::wasm_unsupported;
 use core::{i32, u32};
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::types::*;
-use cranelift_codegen::ir::{self, InstBuilder, JumpTableData, MemFlags, ValueLabel};
+use cranelift_codegen::ir::{self, InstBuilder, JumpTableData, MemFlags, Value, ValueLabel};
 use cranelift_codegen::packed_option::ReservedValue;
 use cranelift_frontend::{FunctionBuilder, Variable};
 use wasmparser::{MemoryImmediate, Operator};
@@ -92,7 +93,7 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
         }
         Operator::SetGlobal { global_index } => {
             match state.get_global(builder.func, *global_index, environ)? {
-                GlobalVariable::Const(_) => panic!("global #{} is a constant", global_index),
+                GlobalVariable::Const(_) => panic!("global #{} is a constant", *global_index),
                 GlobalVariable::Memory { gv, offset, ty } => {
                     let addr = builder.ins().global_value(environ.pointer_type(), gv);
                     let flags = ir::MemFlags::trusted();
@@ -132,19 +133,19 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
          ***********************************************************************************/
         Operator::Block { ty } => {
             let next = builder.create_ebb();
-            if let Ok(ty_cre) = blocktype_to_type(*ty) {
+            if let Some(ty_cre) = blocktype_to_type(*ty)? {
                 builder.append_ebb_param(next, ty_cre);
             }
-            state.push_block(next, num_return_values(*ty));
+            state.push_block(next, num_return_values(*ty)?);
         }
         Operator::Loop { ty } => {
             let loop_body = builder.create_ebb();
             let next = builder.create_ebb();
-            if let Ok(ty_cre) = blocktype_to_type(*ty) {
+            if let Some(ty_cre) = blocktype_to_type(*ty)? {
                 builder.append_ebb_param(next, ty_cre);
             }
             builder.ins().jump(loop_body, &[]);
-            state.push_loop(loop_body, next, num_return_values(*ty));
+            state.push_loop(loop_body, next, num_return_values(*ty)?);
             builder.switch_to_block(loop_body);
             environ.translate_loop_header(builder.cursor())?;
         }
@@ -152,16 +153,25 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
             let val = state.pop1();
             let if_not = builder.create_ebb();
             let jump_inst = builder.ins().brz(val, if_not, &[]);
+
+            #[cfg(feature = "basic-blocks")]
+            {
+                let next_ebb = builder.create_ebb();
+                builder.ins().jump(next_ebb, &[]);
+                builder.seal_block(next_ebb); // Only predecessor is the current block.
+                builder.switch_to_block(next_ebb);
+            }
+
             // Here we append an argument to an Ebb targeted by an argumentless jump instruction
             // But in fact there are two cases:
             // - either the If does not have a Else clause, in that case ty = EmptyBlock
             //   and we add nothing;
             // - either the If have an Else clause, in that case the destination of this jump
             //   instruction will be changed later when we translate the Else operator.
-            if let Ok(ty_cre) = blocktype_to_type(*ty) {
+            if let Some(ty_cre) = blocktype_to_type(*ty)? {
                 builder.append_ebb_param(if_not, ty_cre);
             }
-            state.push_if(jump_inst, if_not, num_return_values(*ty));
+            state.push_if(jump_inst, if_not, num_return_values(*ty)?);
         }
         Operator::Else => {
             // We take the control frame pushed by the if, use its ebb as the else body
@@ -824,6 +834,12 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
         Operator::F32Le | Operator::F64Le => {
             translate_fcmp(FloatCC::LessThanOrEqual, builder, state)
         }
+        Operator::RefNull => state.push1(builder.ins().null(environ.reference_type())),
+        Operator::RefIsNull => {
+            let arg = state.pop1();
+            let val = builder.ins().is_null(arg);
+            state.push1(val);
+        }
         Operator::Wake { .. }
         | Operator::I32Wait { .. }
         | Operator::I64Wait { .. }
@@ -891,10 +907,7 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
         | Operator::I64AtomicRmw16UCmpxchg { .. }
         | Operator::I64AtomicRmw32UCmpxchg { .. }
         | Operator::Fence { .. } => {
-            return Err(WasmError::Unsupported("proposed thread operators"));
-        }
-        Operator::RefNull | Operator::RefIsNull { .. } => {
-            return Err(WasmError::Unsupported("proposed reference-type operators"));
+            wasm_unsupported!("proposed thread operator {:?}", op);
         }
         Operator::MemoryInit { .. }
         | Operator::DataDrop { .. }
@@ -907,31 +920,78 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
         | Operator::TableSet { .. }
         | Operator::TableGrow { .. }
         | Operator::TableSize { .. } => {
-            return Err(WasmError::Unsupported("proposed bulk memory operators"));
+            wasm_unsupported!("proposed bulk memory operator {:?}", op);
+        }
+        Operator::V128Const { value } => {
+            let handle = builder.func.dfg.constants.insert(value.bytes().to_vec());
+            let value = builder.ins().vconst(I8X16, handle);
+            // the v128.const is typed in CLIF as a I8x16 but raw_bitcast to a different type before use
+            state.push1(value)
+        }
+        Operator::I8x16Splat
+        | Operator::I16x8Splat
+        | Operator::I32x4Splat
+        | Operator::I64x2Splat
+        | Operator::F32x4Splat
+        | Operator::F64x2Splat => {
+            let value_to_splat = state.pop1();
+            let ty = type_of(op);
+            let splatted = builder.ins().splat(ty, value_to_splat);
+            state.push1(splatted)
+        }
+        Operator::I8x16ExtractLaneS { lane } | Operator::I16x8ExtractLaneS { lane } => {
+            let vector = optionally_bitcast_vector(state.pop1(), type_of(op), builder);
+            let extracted = builder.ins().extractlane(vector, lane.clone());
+            state.push1(builder.ins().sextend(I32, extracted))
+        }
+        Operator::I8x16ExtractLaneU { lane } | Operator::I16x8ExtractLaneU { lane } => {
+            let vector = optionally_bitcast_vector(state.pop1(), type_of(op), builder);
+            state.push1(builder.ins().extractlane(vector, lane.clone()));
+            // on x86, PEXTRB zeroes the upper bits of the destination register of extractlane so uextend is elided; of course, this depends on extractlane being legalized to a PEXTRB
+        }
+        Operator::I32x4ExtractLane { lane }
+        | Operator::I64x2ExtractLane { lane }
+        | Operator::F32x4ExtractLane { lane }
+        | Operator::F64x2ExtractLane { lane } => {
+            let vector = optionally_bitcast_vector(state.pop1(), type_of(op), builder);
+            state.push1(builder.ins().extractlane(vector, lane.clone()))
+        }
+        Operator::I8x16ReplaceLane { lane }
+        | Operator::I16x8ReplaceLane { lane }
+        | Operator::I32x4ReplaceLane { lane }
+        | Operator::I64x2ReplaceLane { lane }
+        | Operator::F32x4ReplaceLane { lane }
+        | Operator::F64x2ReplaceLane { lane } => {
+            let (vector, replacement_value) = state.pop2();
+            let original_vector_type = builder.func.dfg.value_type(vector);
+            let vector = optionally_bitcast_vector(vector, type_of(op), builder);
+            let replaced_vector = builder
+                .ins()
+                .insertlane(vector, lane.clone(), replacement_value);
+            state.push1(optionally_bitcast_vector(
+                replaced_vector,
+                original_vector_type,
+                builder,
+            ))
+        }
+        Operator::V8x16Shuffle { lanes, .. } => {
+            let (vector_a, vector_b) = state.pop2();
+            let a = optionally_bitcast_vector(vector_a, I8X16, builder);
+            let b = optionally_bitcast_vector(vector_b, I8X16, builder);
+            let mask = builder.func.dfg.immediates.push(lanes.to_vec());
+            let shuffled = builder.ins().shuffle(a, b, mask);
+            state.push1(shuffled)
+            // At this point the original types of a and b are lost; users of this value (i.e. this
+            // WASM-to-CLIF translator) may need to raw_bitcast for type-correctness. This is due
+            // to WASM using the less specific v128 type for certain operations and more specific
+            // types (e.g. i8x16) for others.
+        }
+        Operator::I8x16Add | Operator::I16x8Add | Operator::I32x4Add | Operator::I64x2Add => {
+            let (a, b) = state.pop2();
+            state.push1(builder.ins().iadd(a, b))
         }
         Operator::V128Load { .. }
         | Operator::V128Store { .. }
-        | Operator::V128Const { .. }
-        | Operator::I8x16Splat
-        | Operator::I8x16ExtractLaneS { .. }
-        | Operator::I8x16ExtractLaneU { .. }
-        | Operator::I8x16ReplaceLane { .. }
-        | Operator::I16x8Splat
-        | Operator::I16x8ExtractLaneS { .. }
-        | Operator::I16x8ExtractLaneU { .. }
-        | Operator::I16x8ReplaceLane { .. }
-        | Operator::I32x4Splat
-        | Operator::I32x4ExtractLane { .. }
-        | Operator::I32x4ReplaceLane { .. }
-        | Operator::I64x2Splat
-        | Operator::I64x2ExtractLane { .. }
-        | Operator::I64x2ReplaceLane { .. }
-        | Operator::F32x4Splat
-        | Operator::F32x4ExtractLane { .. }
-        | Operator::F32x4ReplaceLane { .. }
-        | Operator::F64x2Splat
-        | Operator::F64x2ExtractLane { .. }
-        | Operator::F64x2ReplaceLane { .. }
         | Operator::I8x16Eq
         | Operator::I8x16Ne
         | Operator::I8x16LtS
@@ -985,7 +1045,6 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
         | Operator::I8x16Shl
         | Operator::I8x16ShrS
         | Operator::I8x16ShrU
-        | Operator::I8x16Add
         | Operator::I8x16AddSaturateS
         | Operator::I8x16AddSaturateU
         | Operator::I8x16Sub
@@ -998,7 +1057,6 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
         | Operator::I16x8Shl
         | Operator::I16x8ShrS
         | Operator::I16x8ShrU
-        | Operator::I16x8Add
         | Operator::I16x8AddSaturateS
         | Operator::I16x8AddSaturateU
         | Operator::I16x8Sub
@@ -1011,7 +1069,6 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
         | Operator::I32x4Shl
         | Operator::I32x4ShrS
         | Operator::I32x4ShrU
-        | Operator::I32x4Add
         | Operator::I32x4Sub
         | Operator::I32x4Mul
         | Operator::I64x2Neg
@@ -1020,7 +1077,6 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
         | Operator::I64x2Shl
         | Operator::I64x2ShrS
         | Operator::I64x2ShrU
-        | Operator::I64x2Add
         | Operator::I64x2Sub
         | Operator::F32x4Abs
         | Operator::F32x4Neg
@@ -1047,14 +1103,13 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
         | Operator::F32x4ConvertSI32x4
         | Operator::F32x4ConvertUI32x4
         | Operator::F64x2ConvertSI64x2
-        | Operator::F64x2ConvertUI64x2
+        | Operator::F64x2ConvertUI64x2 { .. }
         | Operator::V8x16Swizzle
-        | Operator::V8x16Shuffle { .. }
         | Operator::I8x16LoadSplat { .. }
         | Operator::I16x8LoadSplat { .. }
         | Operator::I32x4LoadSplat { .. }
         | Operator::I64x2LoadSplat { .. } => {
-            return Err(WasmError::Unsupported("proposed SIMD operators"));
+            wasm_unsupported!("proposed SIMD operator {:?}", op);
         }
     };
     Ok(())
@@ -1248,6 +1303,14 @@ fn translate_br_if(
     let val = state.pop1();
     let (br_destination, inputs) = translate_br_if_args(relative_depth, state);
     builder.ins().brnz(val, br_destination, inputs);
+
+    #[cfg(feature = "basic-blocks")]
+    {
+        let next_ebb = builder.create_ebb();
+        builder.ins().jump(next_ebb, &[]);
+        builder.seal_block(next_ebb); // The only predecessor is the current block.
+        builder.switch_to_block(next_ebb);
+    }
 }
 
 fn translate_br_if_args(
@@ -1269,4 +1332,175 @@ fn translate_br_if_args(
     };
     let inputs = state.peekn(return_count);
     (br_destination, inputs)
+}
+
+/// Determine the returned value type of a WebAssembly operator
+fn type_of(operator: &Operator) -> Type {
+    match operator {
+        Operator::V128Load { .. }
+        | Operator::V128Store { .. }
+        | Operator::V128Const { .. }
+        | Operator::V128Not
+        | Operator::V128And
+        | Operator::V128Or
+        | Operator::V128Xor
+        | Operator::V128Bitselect => I8X16, // default type representing V128
+
+        Operator::V8x16Shuffle { .. }
+        | Operator::I8x16Splat
+        | Operator::I8x16ExtractLaneS { .. }
+        | Operator::I8x16ExtractLaneU { .. }
+        | Operator::I8x16ReplaceLane { .. }
+        | Operator::I8x16Eq
+        | Operator::I8x16Ne
+        | Operator::I8x16LtS
+        | Operator::I8x16LtU
+        | Operator::I8x16GtS
+        | Operator::I8x16GtU
+        | Operator::I8x16LeS
+        | Operator::I8x16LeU
+        | Operator::I8x16GeS
+        | Operator::I8x16GeU
+        | Operator::I8x16Neg
+        | Operator::I8x16AnyTrue
+        | Operator::I8x16AllTrue
+        | Operator::I8x16Shl
+        | Operator::I8x16ShrS
+        | Operator::I8x16ShrU
+        | Operator::I8x16Add
+        | Operator::I8x16AddSaturateS
+        | Operator::I8x16AddSaturateU
+        | Operator::I8x16Sub
+        | Operator::I8x16SubSaturateS
+        | Operator::I8x16SubSaturateU
+        | Operator::I8x16Mul => I8X16,
+
+        Operator::I16x8Splat
+        | Operator::I16x8ExtractLaneS { .. }
+        | Operator::I16x8ExtractLaneU { .. }
+        | Operator::I16x8ReplaceLane { .. }
+        | Operator::I16x8Eq
+        | Operator::I16x8Ne
+        | Operator::I16x8LtS
+        | Operator::I16x8LtU
+        | Operator::I16x8GtS
+        | Operator::I16x8GtU
+        | Operator::I16x8LeS
+        | Operator::I16x8LeU
+        | Operator::I16x8GeS
+        | Operator::I16x8GeU
+        | Operator::I16x8Neg
+        | Operator::I16x8AnyTrue
+        | Operator::I16x8AllTrue
+        | Operator::I16x8Shl
+        | Operator::I16x8ShrS
+        | Operator::I16x8ShrU
+        | Operator::I16x8Add
+        | Operator::I16x8AddSaturateS
+        | Operator::I16x8AddSaturateU
+        | Operator::I16x8Sub
+        | Operator::I16x8SubSaturateS
+        | Operator::I16x8SubSaturateU
+        | Operator::I16x8Mul => I16X8,
+
+        Operator::I32x4Splat
+        | Operator::I32x4ExtractLane { .. }
+        | Operator::I32x4ReplaceLane { .. }
+        | Operator::I32x4Eq
+        | Operator::I32x4Ne
+        | Operator::I32x4LtS
+        | Operator::I32x4LtU
+        | Operator::I32x4GtS
+        | Operator::I32x4GtU
+        | Operator::I32x4LeS
+        | Operator::I32x4LeU
+        | Operator::I32x4GeS
+        | Operator::I32x4GeU
+        | Operator::I32x4Neg
+        | Operator::I32x4AnyTrue
+        | Operator::I32x4AllTrue
+        | Operator::I32x4Shl
+        | Operator::I32x4ShrS
+        | Operator::I32x4ShrU
+        | Operator::I32x4Add
+        | Operator::I32x4Sub
+        | Operator::I32x4Mul
+        | Operator::F32x4ConvertSI32x4
+        | Operator::F32x4ConvertUI32x4 => I32X4,
+
+        Operator::I64x2Splat
+        | Operator::I64x2ExtractLane { .. }
+        | Operator::I64x2ReplaceLane { .. }
+        | Operator::I64x2Neg
+        | Operator::I64x2AnyTrue
+        | Operator::I64x2AllTrue
+        | Operator::I64x2Shl
+        | Operator::I64x2ShrS
+        | Operator::I64x2ShrU
+        | Operator::I64x2Add
+        | Operator::I64x2Sub
+        | Operator::F64x2ConvertSI64x2
+        | Operator::F64x2ConvertUI64x2 => I64X2,
+
+        Operator::F32x4Splat
+        | Operator::F32x4ExtractLane { .. }
+        | Operator::F32x4ReplaceLane { .. }
+        | Operator::F32x4Eq
+        | Operator::F32x4Ne
+        | Operator::F32x4Lt
+        | Operator::F32x4Gt
+        | Operator::F32x4Le
+        | Operator::F32x4Ge
+        | Operator::F32x4Abs
+        | Operator::F32x4Neg
+        | Operator::F32x4Sqrt
+        | Operator::F32x4Add
+        | Operator::F32x4Sub
+        | Operator::F32x4Mul
+        | Operator::F32x4Div
+        | Operator::F32x4Min
+        | Operator::F32x4Max
+        | Operator::I32x4TruncSF32x4Sat
+        | Operator::I32x4TruncUF32x4Sat => F32X4,
+
+        Operator::F64x2Splat
+        | Operator::F64x2ExtractLane { .. }
+        | Operator::F64x2ReplaceLane { .. }
+        | Operator::F64x2Eq
+        | Operator::F64x2Ne
+        | Operator::F64x2Lt
+        | Operator::F64x2Gt
+        | Operator::F64x2Le
+        | Operator::F64x2Ge
+        | Operator::F64x2Abs
+        | Operator::F64x2Neg
+        | Operator::F64x2Sqrt
+        | Operator::F64x2Add
+        | Operator::F64x2Sub
+        | Operator::F64x2Mul
+        | Operator::F64x2Div
+        | Operator::F64x2Min
+        | Operator::F64x2Max
+        | Operator::I64x2TruncSF64x2Sat
+        | Operator::I64x2TruncUF64x2Sat => F64X2,
+
+        _ => unimplemented!(
+            "Currently only the SIMD instructions are translated to their return type: {:?}",
+            operator
+        ),
+    }
+}
+
+/// Some SIMD operations only operate on I8X16 in CLIF; this will convert them to that type by
+/// adding a raw_bitcast if necessary
+fn optionally_bitcast_vector(
+    value: Value,
+    needed_type: Type,
+    builder: &mut FunctionBuilder,
+) -> Value {
+    if builder.func.dfg.value_type(value) != needed_type {
+        builder.ins().raw_bitcast(needed_type, value)
+    } else {
+        value
+    }
 }
