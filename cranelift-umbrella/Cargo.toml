@@ -13,7 +13,7 @@ edition = "2018"
 
 [dependencies]
 cranelift-codegen = { path = "../cranelift-codegen", version = "0.43.1", default-features = false }
-cranelift-frontend = { path = "../cranelift-frontend", version = "0.43.1", default-features = false }
+cranelift-frontend = { package = "wasmer-clif-fork-frontend", path = "../cranelift-frontend", version = "0.43.1", default-features = false }
 
 [features]
 default = ["std"]

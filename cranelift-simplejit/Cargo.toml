@@ -28,7 +28,7 @@ default = []
 
 [dev-dependencies]
 cranelift = { path = "../cranelift-umbrella", version = "0.43.1" }
-cranelift-frontend = { path = "../cranelift-frontend", version = "0.43.1" }
+cranelift-frontend = { package = "wasmer-clif-fork-frontend", path = "../cranelift-frontend", version = "0.43.1" }
 cranelift-entity = { path = "../cranelift-entity", version = "0.43.1" }
 
 [badges]
