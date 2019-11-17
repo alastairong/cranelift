@@ -18,11 +18,11 @@ use crate::entity::{EntityList, ListPool};
 use crate::entity::{Keys, PrimaryMap, SecondaryMap};
 use crate::ir::{Function, Value};
 use crate::packed_option::PackedOption;
+use alloc::vec::Vec;
 use core::cmp::Ordering;
 use core::fmt;
 use core::slice;
 use smallvec::SmallVec;
-use std::vec::Vec;
 
 /// A virtual register reference.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -259,9 +259,9 @@ impl UFEntry {
     /// Decode a table entry.
     fn decode(x: i32) -> Self {
         if x < 0 {
-            UFEntry::Link(Value::from_u32((!x) as u32))
+            Self::Link(Value::from_u32((!x) as u32))
         } else {
-            UFEntry::Rank(x as u32)
+            Self::Rank(x as u32)
         }
     }
 

@@ -34,6 +34,10 @@ pub struct Function {
     /// Signature of this function.
     pub signature: Signature,
 
+    /// The old signature of this function, before the most recent legalization,
+    /// if any.
+    pub old_signature: Option<Signature>,
+
     /// Stack slots allocated in this function.
     pub stack_slots: StackSlots,
 
@@ -83,6 +87,11 @@ pub struct Function {
     /// Track the original source location for each instruction. The source locations are not
     /// interpreted by Cranelift, only preserved.
     pub srclocs: SourceLocs,
+
+    /// Instruction that marks the end (inclusive) of the function's prologue.
+    ///
+    /// This is used for some calling conventions to track the end of unwind information.
+    pub prologue_end: Option<Inst>,
 }
 
 impl Function {
@@ -91,6 +100,7 @@ impl Function {
         Self {
             name,
             signature: sig,
+            old_signature: None,
             stack_slots: StackSlots::new(),
             global_values: PrimaryMap::new(),
             heaps: PrimaryMap::new(),
@@ -104,6 +114,7 @@ impl Function {
             offsets: SecondaryMap::new(),
             jt_offsets: SecondaryMap::new(),
             srclocs: SecondaryMap::new(),
+            prologue_end: None,
         }
     }
 
@@ -123,6 +134,7 @@ impl Function {
         self.offsets.clear();
         self.jt_offsets.clear();
         self.srclocs.clear();
+        self.prologue_end = None;
     }
 
     /// Create a new empty, anonymous function with a Fast calling convention.
@@ -266,6 +278,14 @@ impl Function {
         }
 
         Ok(())
+    }
+
+    /// Returns true if the function is function that doesn't call any other functions. This is not
+    /// to be confused with a "leaf function" in Windows terminology.
+    pub fn is_leaf(&self) -> bool {
+        // Conservative result: if there's at least one function signature referenced in this
+        // function, assume it may call.
+        !self.dfg.signatures.is_empty()
     }
 }
 

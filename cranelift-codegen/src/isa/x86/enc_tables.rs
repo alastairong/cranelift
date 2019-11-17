@@ -10,7 +10,7 @@ use crate::ir::{self, Function, Inst, InstBuilder};
 use crate::isa::constraints::*;
 use crate::isa::enc_tables::*;
 use crate::isa::encoding::base_size;
-use crate::isa::encoding::RecipeSizing;
+use crate::isa::encoding::{Encoding, RecipeSizing};
 use crate::isa::RegUnit;
 use crate::isa::{self, TargetIsa};
 use crate::predicates;
@@ -46,6 +46,7 @@ fn additional_size_if(
 
 fn size_plus_maybe_offset_for_in_reg_0(
     sizing: &RecipeSizing,
+    _enc: Encoding,
     inst: Inst,
     divert: &RegDiversions,
     func: &Function,
@@ -54,6 +55,7 @@ fn size_plus_maybe_offset_for_in_reg_0(
 }
 fn size_plus_maybe_offset_for_in_reg_1(
     sizing: &RecipeSizing,
+    _enc: Encoding,
     inst: Inst,
     divert: &RegDiversions,
     func: &Function,
@@ -62,6 +64,7 @@ fn size_plus_maybe_offset_for_in_reg_1(
 }
 fn size_plus_maybe_sib_for_in_reg_0(
     sizing: &RecipeSizing,
+    _enc: Encoding,
     inst: Inst,
     divert: &RegDiversions,
     func: &Function,
@@ -70,6 +73,7 @@ fn size_plus_maybe_sib_for_in_reg_0(
 }
 fn size_plus_maybe_sib_for_in_reg_1(
     sizing: &RecipeSizing,
+    _enc: Encoding,
     inst: Inst,
     divert: &RegDiversions,
     func: &Function,
@@ -78,6 +82,7 @@ fn size_plus_maybe_sib_for_in_reg_1(
 }
 fn size_plus_maybe_sib_or_offset_for_in_reg_0(
     sizing: &RecipeSizing,
+    _enc: Encoding,
     inst: Inst,
     divert: &RegDiversions,
     func: &Function,
@@ -86,6 +91,7 @@ fn size_plus_maybe_sib_or_offset_for_in_reg_0(
 }
 fn size_plus_maybe_sib_or_offset_for_in_reg_1(
     sizing: &RecipeSizing,
+    _enc: Encoding,
     inst: Inst,
     divert: &RegDiversions,
     func: &Function,
@@ -1087,6 +1093,30 @@ fn convert_insertlane(
                 .dfg
                 .replace(inst)
                 .x86_pinsr(vector, lane, replacement);
+        }
+    }
+}
+
+/// For SIMD negation, convert an `ineg` to a `vconst + isub`.
+fn convert_ineg(
+    inst: ir::Inst,
+    func: &mut ir::Function,
+    _cfg: &mut ControlFlowGraph,
+    _isa: &dyn TargetIsa,
+) {
+    let mut pos = FuncCursor::new(func).at_inst(inst);
+    pos.use_srcloc(inst);
+
+    if let ir::InstructionData::Unary {
+        opcode: ir::Opcode::Ineg,
+        arg,
+    } = pos.func.dfg[inst]
+    {
+        let value_type = pos.func.dfg.value_type(arg);
+        if value_type.is_vector() && value_type.lane_type().is_int() {
+            let zero_immediate = pos.func.dfg.constants.insert(vec![0; 16].into());
+            let zero_value = pos.ins().vconst(value_type, zero_immediate); // this should be legalized to a PXOR
+            pos.func.dfg.replace(inst).isub(zero_value, arg);
         }
     }
 }

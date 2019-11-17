@@ -5,7 +5,7 @@ use crate::ir;
 use crate::ir::builder::ReplaceBuilder;
 use crate::ir::extfunc::ExtFuncData;
 use crate::ir::instructions::{BranchInfo, CallInfo, InstructionData};
-use crate::ir::{types, ConstantPool, Immediate};
+use crate::ir::{types, ConstantData, ConstantPool, Immediate};
 use crate::ir::{
     Ebb, FuncRef, Inst, SigRef, Signature, Type, Value, ValueLabelAssignments, ValueList,
     ValueListPool,
@@ -13,13 +13,12 @@ use crate::ir::{
 use crate::isa::TargetIsa;
 use crate::packed_option::ReservedValue;
 use crate::write::write_operands;
+use crate::HashMap;
 use core::fmt;
 use core::iter;
 use core::mem;
 use core::ops::{Index, IndexMut};
 use core::u16;
-use std::collections::HashMap;
-use std::vec::Vec;
 
 /// A data flow graph defines all instructions and extended basic blocks in a function as well as
 /// the data flow dependencies between them. The DFG also tracks values which can be either
@@ -63,6 +62,9 @@ pub struct DataFlowGraph {
     /// well as the external function references.
     pub signatures: PrimaryMap<SigRef, Signature>,
 
+    /// The pre-legalization signature for each entry in `signatures`, if any.
+    pub old_signatures: SecondaryMap<SigRef, Option<Signature>>,
+
     /// External function references. These are functions that can be called directly.
     pub ext_funcs: PrimaryMap<FuncRef, ExtFuncData>,
 
@@ -73,7 +75,7 @@ pub struct DataFlowGraph {
     pub constants: ConstantPool,
 
     /// Stores large immediates that otherwise will not fit on InstructionData
-    pub immediates: PrimaryMap<Immediate, Vec<u8>>,
+    pub immediates: PrimaryMap<Immediate, ConstantData>,
 }
 
 impl DataFlowGraph {
@@ -86,6 +88,7 @@ impl DataFlowGraph {
             value_lists: ValueListPool::new(),
             values: PrimaryMap::new(),
             signatures: PrimaryMap::new(),
+            old_signatures: SecondaryMap::new(),
             ext_funcs: PrimaryMap::new(),
             values_labels: None,
             constants: ConstantPool::new(),
@@ -101,6 +104,7 @@ impl DataFlowGraph {
         self.value_lists.clear();
         self.values.clear();
         self.signatures.clear();
+        self.old_signatures.clear();
         self.ext_funcs.clear();
         self.values_labels = None;
         self.constants.clear();
@@ -379,7 +383,7 @@ impl ValueDef {
     /// Unwrap the instruction where the value was defined, or panic.
     pub fn unwrap_inst(&self) -> Inst {
         match *self {
-            ValueDef::Result(inst, _) => inst,
+            Self::Result(inst, _) => inst,
             _ => panic!("Value is not an instruction result"),
         }
     }
@@ -387,7 +391,7 @@ impl ValueDef {
     /// Unwrap the EBB there the parameter is defined, or panic.
     pub fn unwrap_ebb(&self) -> Ebb {
         match *self {
-            ValueDef::Param(ebb, _) => ebb,
+            Self::Param(ebb, _) => ebb,
             _ => panic!("Value is not an EBB parameter"),
         }
     }
@@ -403,7 +407,7 @@ impl ValueDef {
     /// this value.
     pub fn num(self) -> usize {
         match self {
-            ValueDef::Result(_, n) | ValueDef::Param(_, n) => n,
+            Self::Result(_, n) | Self::Param(_, n) => n,
         }
     }
 }
@@ -1093,7 +1097,7 @@ mod tests {
     use crate::cursor::{Cursor, FuncCursor};
     use crate::ir::types;
     use crate::ir::{Function, InstructionData, Opcode, TrapCode};
-    use std::string::ToString;
+    use alloc::string::ToString;
 
     #[test]
     fn make_inst() {

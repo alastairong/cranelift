@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::iter::FromIterator;
 
 #[derive(Debug, Hash, PartialEq, Eq)]
-pub enum Constraint {
+pub(crate) enum Constraint {
     /// Constraint specifying that a type var tv1 must be wider than or equal to type var tv2 at
     /// runtime. This requires that:
     /// 1) They have the same number of lanes
@@ -74,7 +74,7 @@ impl Constraint {
                 }
 
                 // Trivially false.
-                if (&ts1.lanes & &ts2.lanes).len() == 0 {
+                if (&ts1.lanes & &ts2.lanes).is_empty() {
                     return true;
                 }
 
@@ -155,12 +155,7 @@ impl TypeEnvironment {
     }
 
     fn add_constraint(&mut self, constraint: Constraint) {
-        if self
-            .constraints
-            .iter()
-            .find(|&item| item == &constraint)
-            .is_some()
-        {
+        if self.constraints.iter().any(|item| *item == constraint) {
             return;
         }
 
@@ -257,7 +252,7 @@ impl TypeEnvironment {
                 .map(|tv| self.get_equivalent(tv).free_typevar())
                 .filter(|opt_tv| {
                     // Filter out singleton types.
-                    return opt_tv.is_some();
+                    opt_tv.is_some()
                 })
                 .map(|tv| tv.unwrap()),
         );
@@ -306,7 +301,7 @@ impl TypeEnvironment {
 
             children
                 .entry(parent_tv)
-                .or_insert(HashSet::new())
+                .or_insert_with(HashSet::new)
                 .insert(type_var.clone());
         }
 
@@ -314,7 +309,7 @@ impl TypeEnvironment {
         for (equivalent_tv, canon_tv) in self.equivalency_map.iter() {
             children
                 .entry(canon_tv.clone())
-                .or_insert(HashSet::new())
+                .or_insert_with(HashSet::new)
                 .insert(equivalent_tv.clone());
         }
 
@@ -604,7 +599,7 @@ fn infer_definition(
 /// Perform type inference on an transformation. Return an updated type environment or error.
 pub(crate) fn infer_transform(
     src: DefIndex,
-    dst: &Vec<DefIndex>,
+    dst: &[DefIndex],
     def_pool: &DefPool,
     var_pool: &mut VarPool,
 ) -> Result<TypeEnvironment, String> {
