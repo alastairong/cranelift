@@ -188,9 +188,9 @@ impl ControlStackFrame {
 pub struct FuncTranslationState {
     /// A stack of values corresponding to the active values in the input wasm function at this
     /// point.
-    pub(crate) stack: Vec<Value>,
+    pub stack: Vec<Value>,
     /// A stack of active control flow operations at this point in the input wasm function.
-    pub(crate) control_stack: Vec<ControlStackFrame>,
+    pub control_stack: Vec<ControlStackFrame>,
     /// Is the current translation state still reachable? This is false when translating operators
     /// like End, Return, or Unreachable.
     pub(crate) reachable: bool,
@@ -254,7 +254,7 @@ impl FuncTranslationState {
     ///
     /// This resets the state to containing only a single block representing the whole function.
     /// The exit block is the last block in the function which will contain the return instruction.
-    pub(crate) fn initialize(&mut self, sig: &ir::Signature, exit_block: Ebb) {
+    pub fn initialize(&mut self, sig: &ir::Signature, exit_block: Ebb) {
         self.clear();
         self.push_block(
             exit_block,
