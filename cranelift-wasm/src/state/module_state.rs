@@ -18,7 +18,7 @@ pub struct ModuleTranslationState {
     ///
     /// This is used for translating multi-value Wasm blocks inside functions,
     /// which are encoded to refer to their type signature via index.
-    pub(crate) wasm_types: WasmTypes,
+    pub wasm_types: WasmTypes,
 }
 
 impl ModuleTranslationState {
