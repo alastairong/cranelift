@@ -9,7 +9,7 @@ topdir=$(dirname "$0")
 cd "$topdir"
 
 # All the cranelift-* crates have the same version number
-version="0.44.0"
+version="0.51.0"
 
 # Update all of the Cargo.toml files.
 #
@@ -33,15 +33,17 @@ cargo update
 #
 # Note that libraries need to be published in topological order.
 
+echo git checkout -b bump-version-to-$version
 echo git commit -a -m "\"Bump version to $version"\"
 echo git tag v$version
-echo git push
+echo git push origin bump-version-to-$version
+echo "# Don't forget to click the above link to open a pull-request!"
 echo git push origin v$version
 for crate in \
     entity bforest codegen/shared codegen/meta codegen frontend native \
     preopt \
     reader wasm module \
-    faerie umbrella simplejit
+    faerie umbrella simplejit object
 do
     echo cargo publish --manifest-path "cranelift-$crate/Cargo.toml"
 

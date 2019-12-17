@@ -4,7 +4,7 @@
 //! between a conditional branch and the following terminator.
 #![cfg(feature = "basic-blocks")]
 
-use std::vec::Vec;
+use alloc::vec::Vec;
 
 use crate::cursor::{Cursor, EncCursor};
 use crate::dominator_tree::DominatorTree;
@@ -22,7 +22,6 @@ pub fn run(
 ) {
     let mut ctx = Context {
         has_new_blocks: false,
-        has_fallthrough_return: None,
         cur: EncCursor::new(func, isa),
         domtree,
         topo,
@@ -34,12 +33,6 @@ pub fn run(
 struct Context<'a> {
     /// True if new blocks were inserted.
     has_new_blocks: bool,
-
-    /// Record whether newly inserted empty blocks should be inserted last, or before the last, to
-    /// avoid disturbing the expected control flow of `fallthroug_return` statements.
-    ///
-    /// This value is computed when needed. The Option wraps the computed value if any.
-    has_fallthrough_return: Option<bool>,
 
     /// Current instruction as well as reference to function and ISA.
     cur: EncCursor<'a>,
@@ -89,7 +82,13 @@ impl<'a> Context<'a> {
         // If there are any parameters, split the edge.
         if self.should_split_edge(target) {
             // Create the block the branch will jump to.
-            let new_ebb = self.make_empty_ebb();
+            let new_ebb = self.cur.func.dfg.make_ebb();
+
+            // Insert the new block before the destination, such that it can fallthrough in the
+            // target block.
+            assert_ne!(Some(target), self.cur.layout().entry_block());
+            self.cur.layout_mut().insert_ebb(new_ebb, target);
+            self.has_new_blocks = true;
 
             // Extract the arguments of the branch instruction, split the Ebb parameters and the
             // branch arguments
@@ -97,7 +96,7 @@ impl<'a> Context<'a> {
             let dfg = &mut self.cur.func.dfg;
             let old_args: Vec<_> = {
                 let args = dfg[branch].take_value_list().expect("ebb parameters");
-                args.as_slice(&dfg.value_lists).iter().map(|x| *x).collect()
+                args.as_slice(&dfg.value_lists).iter().copied().collect()
             };
             let (branch_args, ebb_params) = old_args.split_at(num_fixed);
 
@@ -157,41 +156,16 @@ impl<'a> Context<'a> {
         }
     }
 
-    // A new ebb must be inserted before the last ebb because the last ebb may have a
-    // fallthrough_return and can't have anything after it.
-    fn make_empty_ebb(&mut self) -> Ebb {
-        let last_ebb = self.cur.layout().last_ebb().unwrap();
-        if self.has_fallthrough_return == None {
-            let last_inst = self.cur.layout().last_inst(last_ebb).unwrap();
-            self.has_fallthrough_return =
-                Some(self.cur.func.dfg[last_inst].opcode() == Opcode::FallthroughReturn);
-        }
-        let new_ebb = self.cur.func.dfg.make_ebb();
-        if self.has_fallthrough_return == Some(true) {
-            // Insert before the last block which has a fallthrough_return
-            // instruction.
-            self.cur.layout_mut().insert_ebb(new_ebb, last_ebb);
-        } else {
-            // Insert after the last block.
-            self.cur.layout_mut().insert_ebb_after(new_ebb, last_ebb);
-        }
-        self.has_new_blocks = true;
-        new_ebb
-    }
-
     /// Returns whether we should introduce a new branch.
     fn should_split_edge(&self, target: Ebb) -> bool {
         // We should split the edge if the target has any parameters.
-        if self.cur.func.dfg.ebb_params(target).len() > 0 {
+        if !self.cur.func.dfg.ebb_params(target).is_empty() {
             return true;
         };
 
         // Or, if the target has more than one block reaching it.
         debug_assert!(self.cfg.pred_iter(target).next() != None);
-        if let Some(_) = self.cfg.pred_iter(target).skip(1).next() {
-            return true;
-        };
 
-        false
+        self.cfg.pred_iter(target).nth(1).is_some()
     }
 }

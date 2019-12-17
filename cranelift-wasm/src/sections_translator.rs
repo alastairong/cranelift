@@ -8,6 +8,7 @@
 //! is handled, according to the semantics of WebAssembly, to only specific expressions that are
 //! interpreted on the fly.
 use crate::environ::{ModuleEnvironment, WasmResult};
+use crate::state::ModuleTranslationState;
 use crate::translation_utils::{
     tabletype_to_type, type_to_type, FuncIndex, Global, GlobalIndex, GlobalInit, Memory,
     MemoryIndex, SignatureIndex, Table, TableElementType, TableIndex,
@@ -29,29 +30,34 @@ use wasmparser::{
 /// Parses the Type section of the wasm module.
 pub fn parse_type_section(
     types: TypeSectionReader,
+    module_translation_state: &mut ModuleTranslationState,
     environ: &mut dyn ModuleEnvironment,
 ) -> WasmResult<()> {
-    environ.reserve_signatures(types.get_count())?;
+    let count = types.get_count();
+    module_translation_state.wasm_types.reserve(count as usize);
+    environ.reserve_signatures(count)?;
 
     for entry in types {
         match entry? {
             FuncType {
                 form: wasmparser::Type::Func,
-                ref params,
-                ref returns,
+                params,
+                returns,
             } => {
-                let mut sig = Signature::new(environ.target_config().default_call_conv);
+                let mut sig =
+                    Signature::new(ModuleEnvironment::target_config(environ).default_call_conv);
                 sig.params.extend(params.iter().map(|ty| {
-                    let cret_arg: ir::Type = type_to_type(*ty)
+                    let cret_arg: ir::Type = type_to_type(*ty, environ)
                         .expect("only numeric types are supported in function signatures");
                     AbiParam::new(cret_arg)
                 }));
                 sig.returns.extend(returns.iter().map(|ty| {
-                    let cret_arg: ir::Type = type_to_type(*ty)
+                    let cret_arg: ir::Type = type_to_type(*ty, environ)
                         .expect("only numeric types are supported in function signatures");
                     AbiParam::new(cret_arg)
                 }));
                 environ.declare_signature(sig)?;
+                module_translation_state.wasm_types.push((params, returns));
             }
             ty => {
                 return Err(wasm_unsupported!(
@@ -101,7 +107,7 @@ pub fn parse_import_section<'data>(
             ImportSectionEntryType::Global(ref ty) => {
                 environ.declare_global_import(
                     Global {
-                        ty: type_to_type(ty.content_type).unwrap(),
+                        ty: type_to_type(ty.content_type, environ).unwrap(),
                         mutability: ty.mutable,
                         initializer: GlobalInit::Import,
                     },
@@ -112,7 +118,7 @@ pub fn parse_import_section<'data>(
             ImportSectionEntryType::Table(ref tab) => {
                 environ.declare_table_import(
                     Table {
-                        ty: match tabletype_to_type(tab.element_type)? {
+                        ty: match tabletype_to_type(tab.element_type, environ)? {
                             Some(t) => TableElementType::Val(t),
                             None => TableElementType::Func,
                         },
@@ -155,7 +161,7 @@ pub fn parse_table_section(
     for entry in tables {
         let table = entry?;
         environ.declare_table(Table {
-            ty: match tabletype_to_type(table.element_type)? {
+            ty: match tabletype_to_type(table.element_type, environ)? {
                 Some(t) => TableElementType::Val(t),
                 None => TableElementType::Func,
             },
@@ -210,6 +216,7 @@ pub fn parse_global_section(
             Operator::V128Const { value } => {
                 GlobalInit::V128Const(V128Imm::from(value.bytes().to_vec().as_slice()))
             }
+            Operator::RefNull => GlobalInit::RefNullConst,
             Operator::GetGlobal { global_index } => {
                 GlobalInit::GetGlobal(GlobalIndex::from_u32(global_index))
             }
@@ -221,7 +228,7 @@ pub fn parse_global_section(
             }
         };
         let global = Global {
-            ty: type_to_type(content_type).unwrap(),
+            ty: type_to_type(content_type, environ).unwrap(),
             mutability: mutable,
             initializer,
         };
@@ -323,13 +330,14 @@ pub fn parse_element_section<'data>(
 /// Parses the Code section of the wasm module.
 pub fn parse_code_section<'data>(
     code: CodeSectionReader<'data>,
+    module_translation_state: &ModuleTranslationState,
     environ: &mut dyn ModuleEnvironment<'data>,
 ) -> WasmResult<()> {
     for body in code {
         let mut reader = body?.get_binary_reader();
         let size = reader.bytes_remaining();
         let offset = reader.original_position();
-        environ.define_function_body(reader.read_bytes(size)?, offset)?;
+        environ.define_function_body(module_translation_state, reader.read_bytes(size)?, offset)?;
     }
     Ok(())
 }
@@ -403,8 +411,8 @@ pub fn parse_name_section<'data>(
     Ok(())
 }
 
-fn parse_function_name_subsection<'data>(
-    mut naming_reader: NamingReader<'data>,
+fn parse_function_name_subsection(
+    mut naming_reader: NamingReader<'_>,
 ) -> Option<HashMap<FuncIndex, &str>> {
     let mut function_names = HashMap::new();
     for _ in 0..naming_reader.get_count() {
@@ -419,5 +427,5 @@ fn parse_function_name_subsection<'data>(
             return None;
         }
     }
-    return Some(function_names);
+    Some(function_names)
 }

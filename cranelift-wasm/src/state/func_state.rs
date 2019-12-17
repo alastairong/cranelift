@@ -1,13 +1,43 @@
-//! WebAssembly function translation state.
+//! WebAssembly module and function translation state.
 //!
-//! The `TranslationState` struct defined in this module is used to keep track of the WebAssembly
+//! The `ModuleTranslationState` struct defined in this module is used to keep track of data about
+//! the whole WebAssembly module, such as the decoded type signatures.
+//!
+//! The `FuncTranslationState` struct defined in this module is used to keep track of the WebAssembly
 //! value and control stacks during the translation of a single function.
 
-use super::{HashMap, Occupied, Vacant};
 use crate::environ::{FuncEnvironment, GlobalVariable, WasmResult};
 use crate::translation_utils::{FuncIndex, GlobalIndex, MemoryIndex, SignatureIndex, TableIndex};
+use crate::{HashMap, Occupied, Vacant};
 use cranelift_codegen::ir::{self, Ebb, Inst, Value};
 use std::vec::Vec;
+
+/// Information about the presence of an associated `else` for an `if`, or the
+/// lack thereof.
+#[derive(Debug)]
+pub enum ElseData {
+    /// The `if` does not already have an `else` block.
+    ///
+    /// This doesn't mean that it will never have an `else`, just that we
+    /// haven't seen it yet.
+    NoElse {
+        /// If we discover that we need an `else` block, this is the jump
+        /// instruction that needs to be fixed up to point to the new `else`
+        /// block rather than the destination block after the `if...end`.
+        branch_inst: Inst,
+    },
+
+    /// We have already allocated an `else` block.
+    ///
+    /// Usually we don't know whether we will hit an `if .. end` or an `if
+    /// .. else .. end`, but sometimes we can tell based on the block's type
+    /// signature that the signature is not valid if there isn't an `else`. In
+    /// these cases, we pre-allocate the `else` block.
+    WithElse {
+        /// This is the `else` block.
+        else_block: Ebb,
+    },
+}
 
 /// A control stack frame can be an `if`, a `block` or a `loop`, each one having the following
 /// fields:
@@ -23,14 +53,27 @@ use std::vec::Vec;
 pub enum ControlStackFrame {
     If {
         destination: Ebb,
-        branch_inst: Inst,
+        else_data: ElseData,
+        num_param_values: usize,
         num_return_values: usize,
         original_stack_size: usize,
         exit_is_branched_to: bool,
-        reachable_from_top: bool,
+        blocktype: wasmparser::TypeOrFuncType,
+        /// Was the head of the `if` reachable?
+        head_is_reachable: bool,
+        /// What was the reachability at the end of the consequent?
+        ///
+        /// This is `None` until we're finished translating the consequent, and
+        /// is set to `Some` either by hitting an `else` when we will begin
+        /// translating the alternative, or by hitting an `end` in which case
+        /// there is no alternative.
+        consequent_ends_reachable: Option<bool>,
+        // Note: no need for `alternative_ends_reachable` because that is just
+        // `state.reachable` when we hit the `end` in the `if .. else .. end`.
     },
     Block {
         destination: Ebb,
+        num_param_values: usize,
         num_return_values: usize,
         original_stack_size: usize,
         exit_is_branched_to: bool,
@@ -38,6 +81,7 @@ pub enum ControlStackFrame {
     Loop {
         destination: Ebb,
         header: Ebb,
+        num_param_values: usize,
         num_return_values: usize,
         original_stack_size: usize,
     },
@@ -47,42 +91,54 @@ pub enum ControlStackFrame {
 impl ControlStackFrame {
     pub fn num_return_values(&self) -> usize {
         match *self {
-            ControlStackFrame::If {
+            Self::If {
                 num_return_values, ..
             }
-            | ControlStackFrame::Block {
+            | Self::Block {
                 num_return_values, ..
             }
-            | ControlStackFrame::Loop {
+            | Self::Loop {
                 num_return_values, ..
             } => num_return_values,
         }
     }
+    pub fn num_param_values(&self) -> usize {
+        match *self {
+            Self::If {
+                num_param_values, ..
+            }
+            | Self::Block {
+                num_param_values, ..
+            }
+            | Self::Loop {
+                num_param_values, ..
+            } => num_param_values,
+        }
+    }
     pub fn following_code(&self) -> Ebb {
         match *self {
-            ControlStackFrame::If { destination, .. }
-            | ControlStackFrame::Block { destination, .. }
-            | ControlStackFrame::Loop { destination, .. } => destination,
+            Self::If { destination, .. }
+            | Self::Block { destination, .. }
+            | Self::Loop { destination, .. } => destination,
         }
     }
     pub fn br_destination(&self) -> Ebb {
         match *self {
-            ControlStackFrame::If { destination, .. }
-            | ControlStackFrame::Block { destination, .. } => destination,
-            ControlStackFrame::Loop { header, .. } => header,
+            Self::If { destination, .. } | Self::Block { destination, .. } => destination,
+            Self::Loop { header, .. } => header,
         }
     }
     pub fn original_stack_size(&self) -> usize {
         match *self {
-            ControlStackFrame::If {
+            Self::If {
                 original_stack_size,
                 ..
             }
-            | ControlStackFrame::Block {
+            | Self::Block {
                 original_stack_size,
                 ..
             }
-            | ControlStackFrame::Loop {
+            | Self::Loop {
                 original_stack_size,
                 ..
             } => original_stack_size,
@@ -90,68 +146,46 @@ impl ControlStackFrame {
     }
     pub fn is_loop(&self) -> bool {
         match *self {
-            ControlStackFrame::If { .. } | ControlStackFrame::Block { .. } => false,
-            ControlStackFrame::Loop { .. } => true,
+            Self::If { .. } | Self::Block { .. } => false,
+            Self::Loop { .. } => true,
         }
     }
 
     pub fn exit_is_branched_to(&self) -> bool {
         match *self {
-            ControlStackFrame::If {
+            Self::If {
                 exit_is_branched_to,
                 ..
             }
-            | ControlStackFrame::Block {
+            | Self::Block {
                 exit_is_branched_to,
                 ..
             } => exit_is_branched_to,
-            ControlStackFrame::Loop { .. } => false,
+            Self::Loop { .. } => false,
         }
     }
 
     pub fn set_branched_to_exit(&mut self) {
         match *self {
-            ControlStackFrame::If {
+            Self::If {
                 ref mut exit_is_branched_to,
                 ..
             }
-            | ControlStackFrame::Block {
+            | Self::Block {
                 ref mut exit_is_branched_to,
                 ..
             } => *exit_is_branched_to = true,
-            ControlStackFrame::Loop { .. } => {}
+            Self::Loop { .. } => {}
         }
     }
 }
 
-/// VisibleTranslationState wraps a TranslationState with an interface appropriate for users
-/// outside this `cranelift-wasm`.
-///
-/// VisibleTranslationState is currently very minimal (only exposing reachability information), but
-/// is anticipated to grow in the future, with functions to inspect or modify the wasm operand
-/// stack for example.
-pub struct VisibleTranslationState<'a> {
-    state: &'a TranslationState,
-}
-
-impl<'a> VisibleTranslationState<'a> {
-    /// Build a VisibleTranslationState from an existing TranslationState
-    pub fn new(state: &'a TranslationState) -> Self {
-        VisibleTranslationState { state }
-    }
-
-    /// True if the current translation state expresses reachable code, false if it is unreachable
-    pub fn reachable(&self) -> bool {
-        self.state.reachable
-    }
-}
-
-/// Contains information passed along during the translation and that records:
+/// Contains information passed along during a function's translation and that records:
 ///
 /// - The current value and control stacks.
 /// - The depth of the two unreachable control blocks stacks, that are manipulated when translating
 ///   unreachable code;
-pub struct TranslationState {
+pub struct FuncTranslationState {
     /// A stack of values corresponding to the active values in the input wasm function at this
     /// point.
     pub stack: Vec<Value>,
@@ -181,9 +215,18 @@ pub struct TranslationState {
     functions: HashMap<FuncIndex, (ir::FuncRef, usize)>,
 }
 
-impl TranslationState {
-    /// Construct a new, empty, `TranslationState`
-    pub fn new() -> Self {
+// Public methods that are exposed to non-`cranelift_wasm` API consumers.
+impl FuncTranslationState {
+    /// True if the current translation state expresses reachable code, false if it is unreachable.
+    #[inline]
+    pub fn reachable(&self) -> bool {
+        self.reachable
+    }
+}
+
+impl FuncTranslationState {
+    /// Construct a new, empty, `FuncTranslationState`
+    pub(crate) fn new() -> Self {
         Self {
             stack: Vec::new(),
             control_stack: Vec::new(),
@@ -215,6 +258,7 @@ impl TranslationState {
         self.clear();
         self.push_block(
             exit_block,
+            0,
             sig.returns
                 .iter()
                 .filter(|arg| arg.purpose == ir::ArgumentPurpose::Normal)
@@ -223,34 +267,39 @@ impl TranslationState {
     }
 
     /// Push a value.
-    pub fn push1(&mut self, val: Value) {
+    pub(crate) fn push1(&mut self, val: Value) {
         self.stack.push(val);
     }
 
     /// Push multiple values.
-    pub fn pushn(&mut self, vals: &[Value]) {
+    pub(crate) fn pushn(&mut self, vals: &[Value]) {
         self.stack.extend_from_slice(vals);
     }
 
     /// Pop one value.
-    pub fn pop1(&mut self) -> Value {
-        self.stack.pop().unwrap()
+    pub(crate) fn pop1(&mut self) -> Value {
+        self.stack
+            .pop()
+            .expect("attempted to pop a value from an empty stack")
     }
 
     /// Peek at the top of the stack without popping it.
-    pub fn peek1(&self) -> Value {
-        *self.stack.last().unwrap()
+    pub(crate) fn peek1(&self) -> Value {
+        *self
+            .stack
+            .last()
+            .expect("attempted to peek at a value on an empty stack")
     }
 
     /// Pop two values. Return them in the order they were pushed.
-    pub fn pop2(&mut self) -> (Value, Value) {
+    pub(crate) fn pop2(&mut self) -> (Value, Value) {
         let v2 = self.stack.pop().unwrap();
         let v1 = self.stack.pop().unwrap();
         (v1, v2)
     }
 
     /// Pop three values. Return them in the order they were pushed.
-    pub fn pop3(&mut self) -> (Value, Value, Value) {
+    pub(crate) fn pop3(&mut self) -> (Value, Value, Value) {
         let v3 = self.stack.pop().unwrap();
         let v2 = self.stack.pop().unwrap();
         let v1 = self.stack.pop().unwrap();
@@ -260,55 +309,105 @@ impl TranslationState {
     /// Pop the top `n` values on the stack.
     ///
     /// The popped values are not returned. Use `peekn` to look at them before popping.
-    pub fn popn(&mut self, n: usize) {
+    pub(crate) fn popn(&mut self, n: usize) {
+        debug_assert!(
+            n <= self.stack.len(),
+            "popn({}) but stack only has {} values",
+            n,
+            self.stack.len()
+        );
         let new_len = self.stack.len() - n;
         self.stack.truncate(new_len);
     }
 
     /// Peek at the top `n` values on the stack in the order they were pushed.
-    pub fn peekn(&self, n: usize) -> &[Value] {
+    pub(crate) fn peekn(&self, n: usize) -> &[Value] {
+        debug_assert!(
+            n <= self.stack.len(),
+            "peekn({}) but stack only has {} values",
+            n,
+            self.stack.len()
+        );
         &self.stack[self.stack.len() - n..]
     }
 
     /// Push a block on the control stack.
-    pub fn push_block(&mut self, following_code: Ebb, num_result_types: usize) {
+    pub(crate) fn push_block(
+        &mut self,
+        following_code: Ebb,
+        num_param_types: usize,
+        num_result_types: usize,
+    ) {
+        debug_assert!(num_param_types <= self.stack.len());
         self.control_stack.push(ControlStackFrame::Block {
             destination: following_code,
-            original_stack_size: self.stack.len(),
+            original_stack_size: self.stack.len() - num_param_types,
+            num_param_values: num_param_types,
             num_return_values: num_result_types,
             exit_is_branched_to: false,
         });
     }
 
     /// Push a loop on the control stack.
-    pub fn push_loop(&mut self, header: Ebb, following_code: Ebb, num_result_types: usize) {
+    pub(crate) fn push_loop(
+        &mut self,
+        header: Ebb,
+        following_code: Ebb,
+        num_param_types: usize,
+        num_result_types: usize,
+    ) {
+        debug_assert!(num_param_types <= self.stack.len());
         self.control_stack.push(ControlStackFrame::Loop {
             header,
             destination: following_code,
-            original_stack_size: self.stack.len(),
+            original_stack_size: self.stack.len() - num_param_types,
+            num_param_values: num_param_types,
             num_return_values: num_result_types,
         });
     }
 
     /// Push an if on the control stack.
-    pub fn push_if(&mut self, branch_inst: Inst, following_code: Ebb, num_result_types: usize) {
+    pub(crate) fn push_if(
+        &mut self,
+        destination: Ebb,
+        else_data: ElseData,
+        num_param_types: usize,
+        num_result_types: usize,
+        blocktype: wasmparser::TypeOrFuncType,
+    ) {
+        debug_assert!(num_param_types <= self.stack.len());
+
+        // Push a second copy of our `if`'s parameters on the stack. This lets
+        // us avoid saving them on the side in the `ControlStackFrame` for our
+        // `else` block (if it exists), which would require a second heap
+        // allocation. See also the comment in `translate_operator` for
+        // `Operator::Else`.
+        self.stack.reserve(num_param_types);
+        for i in (self.stack.len() - num_param_types)..self.stack.len() {
+            let val = self.stack[i];
+            self.stack.push(val);
+        }
+
         self.control_stack.push(ControlStackFrame::If {
-            branch_inst,
-            destination: following_code,
-            original_stack_size: self.stack.len(),
+            destination,
+            else_data,
+            original_stack_size: self.stack.len() - num_param_types,
+            num_param_values: num_param_types,
             num_return_values: num_result_types,
             exit_is_branched_to: false,
-            reachable_from_top: self.reachable,
+            head_is_reachable: self.reachable,
+            consequent_ends_reachable: None,
+            blocktype,
         });
     }
 }
 
 /// Methods for handling entity references.
-impl TranslationState {
+impl FuncTranslationState {
     /// Get the `GlobalVariable` reference that should be used to access the global variable
     /// `index`. Create the reference if necessary.
     /// Also return the WebAssembly type of the global.
-    pub fn get_global<FE: FuncEnvironment + ?Sized>(
+    pub(crate) fn get_global<FE: FuncEnvironment + ?Sized>(
         &mut self,
         func: &mut ir::Function,
         index: u32,
@@ -323,7 +422,7 @@ impl TranslationState {
 
     /// Get the `Heap` reference that should be used to access linear memory `index`.
     /// Create the reference if necessary.
-    pub fn get_heap<FE: FuncEnvironment + ?Sized>(
+    pub(crate) fn get_heap<FE: FuncEnvironment + ?Sized>(
         &mut self,
         func: &mut ir::Function,
         index: u32,
@@ -338,7 +437,7 @@ impl TranslationState {
 
     /// Get the `Table` reference that should be used to access table `index`.
     /// Create the reference if necessary.
-    pub fn get_table<FE: FuncEnvironment + ?Sized>(
+    pub(crate) fn get_table<FE: FuncEnvironment + ?Sized>(
         &mut self,
         func: &mut ir::Function,
         index: u32,
@@ -355,7 +454,7 @@ impl TranslationState {
     /// `index`. Also return the number of WebAssembly arguments in the signature.
     ///
     /// Create the signature if necessary.
-    pub fn get_indirect_sig<FE: FuncEnvironment + ?Sized>(
+    pub(crate) fn get_indirect_sig<FE: FuncEnvironment + ?Sized>(
         &mut self,
         func: &mut ir::Function,
         index: u32,
@@ -375,7 +474,7 @@ impl TranslationState {
     /// `index`. Also return the number of WebAssembly arguments in the signature.
     ///
     /// Create the function reference if necessary.
-    pub fn get_direct_func<FE: FuncEnvironment + ?Sized>(
+    pub(crate) fn get_direct_func<FE: FuncEnvironment + ?Sized>(
         &mut self,
         func: &mut ir::Function,
         index: u32,

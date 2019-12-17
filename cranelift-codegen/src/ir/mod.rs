@@ -6,6 +6,7 @@ pub mod dfg;
 pub mod entities;
 mod extfunc;
 mod extname;
+mod framelayout;
 pub mod function;
 mod globalvalue;
 mod heap;
@@ -26,7 +27,9 @@ mod valueloc;
 #[cfg(feature = "enable-serde")]
 use serde::{Deserialize, Serialize};
 
-pub use crate::ir::builder::{InsertBuilder, InstBuilder, InstBuilderBase, InstInserterBase};
+pub use crate::ir::builder::{
+    InsertBuilder, InstBuilder, InstBuilderBase, InstInserterBase, ReplaceBuilder,
+};
 pub use crate::ir::constant::{ConstantData, ConstantOffset, ConstantPool};
 pub use crate::ir::dfg::{DataFlowGraph, ValueDef};
 pub use crate::ir::entities::{
@@ -37,6 +40,7 @@ pub use crate::ir::extfunc::{
     AbiParam, ArgumentExtension, ArgumentPurpose, ExtFuncData, Signature,
 };
 pub use crate::ir::extname::ExternalName;
+pub use crate::ir::framelayout::{FrameLayout, FrameLayoutChange, FrameLayoutChanges};
 pub use crate::ir::function::{DisplayFunctionAnnotations, Function};
 pub use crate::ir::globalvalue::GlobalValueData;
 pub use crate::ir::heap::{HeapData, HeapStyle};
@@ -98,7 +102,7 @@ pub struct ValueLabelStart {
 #[derive(Debug, Clone)]
 pub enum ValueLabelAssignments {
     /// Original value labels assigned at transform.
-    Starts(std::vec::Vec<ValueLabelStart>),
+    Starts(alloc::vec::Vec<ValueLabelStart>),
 
     /// A value alias to original value.
     Alias {

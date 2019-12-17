@@ -13,12 +13,12 @@ is reflected in the code or documentation yet. If you see things that seem
 missing or that don't make sense, or even that just don't work the way you
 expect them to, we're interested to hear about it!
 
-We have a [CraneStation chat on Gitter], and questions are also welcome as issues
+We have a [chat room on Gitter], and questions are also welcome as issues
 in the [Cranelift issue tracker]. Some folks also hang out in the #cranelift
 IRC channel on [irc.mozilla.org].
 
-[CraneStation chat on Gitter]: https://gitter.im/CraneStation/Lobby
-[Cranelift issue tracker]: https://github.com/CraneStation/cranelift/issues/new
+[chat room on Gitter]: https://gitter.im/CraneStation/Lobby
+[Cranelift issue tracker]: https://github.com/bytecodealliance/cranelift/issues/new
 [irc.mozilla.org]: https://wiki.mozilla.org/IRC
 
 ### Mentoring
@@ -41,16 +41,18 @@ interested in. This a good time to get involved, as there aren't a lot of
 things set in stone yet.
 
 [Rust's issue tags]: https://github.com/rust-lang/rust/blob/master/CONTRIBUTING.md#issue-triage
-[E-easy]: https://github.com/CraneStation/cranelift/labels/E-easy
-[E-rust]: https://github.com/CraneStation/cranelift/labels/E-rust
-[E-compiler-easy]: https://github.com/CraneStation/cranelift/labels/E-compiler-easy
-[full list of labels]: https://github.com/CraneStation/cranelift/labels
+[E-easy]: https://github.com/bytecodealliance/cranelift/labels/E-easy
+[E-rust]: https://github.com/bytecodealliance/cranelift/labels/E-rust
+[E-compiler-easy]: https://github.com/bytecodealliance/cranelift/labels/E-compiler-easy
+[full list of labels]: https://github.com/bytecodealliance/cranelift/labels
 
 ### Code of Conduct
 
-We abide by our [Code of Conduct] and ask that you do as well.
+Cranelift is a [Bytecode Alliance] project, and follows the Bytecode Alliance's [Code of Conduct] and [Organizational Code of Conduct].
 
+[Bytecode Alliance]: https://bytecodealliance.org/
 [Code of Conduct]: CODE_OF_CONDUCT.md
+[Organizational Code of Conduct]: ORG_CODE_OF_CONDUCT.md
 
 ## Coding Guidelines
 
@@ -69,9 +71,9 @@ version. See the [rustfmt quickstart] for setup.
 [format-all.sh] is a script for running the appropriate version of rustfmt,
 which may be convenient when there are multiple versions installed.
 
-[rustfmt-preview]: https://github.com/rust-lang-nursery/rustfmt
-[rustfmt quickstart]: https://github.com/rust-lang-nursery/rustfmt#quick-start
-[format-all.sh]: https://github.com/CraneStation/cranelift/blob/master/format-all.sh
+[rustfmt-preview]: https://github.com/rust-lang/rustfmt
+[rustfmt quickstart]: https://github.com/rust-lang/rustfmt#quick-start
+[format-all.sh]: https://github.com/bytecodealliance/cranelift/blob/master/format-all.sh
 
 ### Rustc version support
 
@@ -90,7 +92,20 @@ We use [issues] for asking questions and tracking bugs and unimplemented
 features, and [pull requests] (PRs) for tracking and reviewing code
 submissions.
 
-When submitting PRs:
+### Before submitting a PR
+
+Consider opening an issue to talk about it. PRs without corresponding issues
+are appropriate for fairly narrow technical matters, not for fixes to
+user-facing bugs or for feature implementations, especially when those features
+might have multiple implementation strategies that usefully could be discussed.
+
+Our issue templates might help you through the process.
+
+### When submitting PRs
+
+ - Please fill in the pull request template as appropriate. It is usually
+   helpful, it speeds up the review process and helps understanding the changes
+   brought by the PR.
 
  - Write clear commit messages that start with a one-line summary of the
    change (and if it's difficult to summarize in one line, consider
@@ -106,8 +121,14 @@ When submitting PRs:
  - For pull requests that fix existing issues, use [issue keywords]. Note that
    not all pull requests need to have accompanying issues.
 
-Anyone may submit a pull request, and anyone may comment on or review others'
-pull requests. Pull requests are merged by members of the [Core Team].
+ - Assign the review to somebody from the [Core Team], either using suggestions
+   in the list proposed by Github, or somebody else if you have a specific
+   person in mind.
+
+ - When updating your pull request, please make sure to re-request review if
+   the request has been cancelled.
+
+### Focused commits or squashing
 
 We generally squash sequences of incremental-development commits together into
 logical commits (though keeping logical commits focused). Developers may do
@@ -115,10 +136,18 @@ this themselves before submitting a PR or during the PR process, or Core Team
 members may do it when merging a PR. Ideally, the continuous-integration tests
 should pass at each logical commit.
 
-Core Team members may push minor changes directly, though should create PRs
-for significant changes.
+### Review and merge
+
+Anyone may submit a pull request, and anyone may comment on or review others'
+pull requests. However, one review from somebody in the [Core Team] is required
+before the Core Team merges it.
+
+Even Core Team members should create PRs for every change, including minor work
+items (version bump, removing warnings, etc.): this is helpful to keep track of
+what has happened on the repository. Very minor changes may be merged without a
+review, although it is always preferred to have one.
 
 [issues]: https://guides.github.com/features/issues/
 [pull requests]: https://help.github.com/articles/about-pull-requests/
 [issue keywords]: https://help.github.com/articles/closing-issues-using-keywords/
-[Core Team]: https://github.com/orgs/CraneStation/people/
+[Core Team]: https://github.com/orgs/bytecodealliance/people/

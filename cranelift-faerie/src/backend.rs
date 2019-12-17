@@ -322,6 +322,7 @@ impl Backend for FaerieBackend {
 /// This is the output of `Module`'s
 /// [`finish`](../cranelift_module/struct.Module.html#method.finish) function.
 /// It provides functions for writing out the object file to memory or a file.
+#[derive(Debug)]
 pub struct FaerieProduct {
     /// Faerie artifact with all functions, data, and links from the module defined
     pub artifact: faerie::Artifact,
@@ -357,7 +358,7 @@ fn translate_function_linkage(linkage: Linkage) -> faerie::Decl {
 }
 
 fn translate_data_linkage(linkage: Linkage, writable: bool, align: Option<u8>) -> faerie::Decl {
-    let align = align.map(|align| u64::from(align));
+    let align = align.map(u64::from);
     match linkage {
         Linkage::Import => faerie::Decl::data_import().into(),
         Linkage::Local => faerie::Decl::data()
