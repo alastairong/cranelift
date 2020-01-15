@@ -15,7 +15,7 @@ use cranelift_codegen::cursor::FuncCursor;
 use cranelift_codegen::ir::immediates::Offset32;
 use cranelift_codegen::ir::{self, InstBuilder};
 use cranelift_codegen::isa::TargetFrontendConfig;
-use cranelift_frontend::FunctionBuilder;
+use wasmer_clif_fork_frontend::FunctionBuilder;
 use std::boxed::Box;
 use thiserror::Error;
 use wasmparser::BinaryReaderError;
