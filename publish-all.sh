@@ -9,13 +9,13 @@ topdir=$(dirname "$0")
 cd "$topdir"
 
 # All the cranelift-* crates have the same version number
-version="0.31.0"
+version="0.52.0"
 
 # Update all of the Cargo.toml files.
 #
 # The main Cargo.toml in the top-level directory is the cranelift-tools crate which we don't publish.
 echo "Updating crate versions to $version"
-for crate in . cranelift-* cranelift-codegen/meta; do
+for crate in . cranelift-* cranelift-codegen/shared cranelift-codegen/meta; do
     # Update the version number of this crate to $version.
     sed -i.bk -e "s/^version = .*/version = \"$version\"/" \
         "$crate/Cargo.toml"
@@ -33,19 +33,21 @@ cargo update
 #
 # Note that libraries need to be published in topological order.
 
+echo git checkout -b bump-version-to-$version
 echo git commit -a -m "\"Bump version to $version"\"
 echo git tag v$version
-echo git push
+echo git push origin bump-version-to-$version
+echo "# Don't forget to click the above link to open a pull-request!"
 echo git push origin v$version
 for crate in \
-    entity bforest codegen/meta codegen frontend native \
+    entity bforest codegen/shared codegen/meta codegen frontend native \
     preopt \
     reader wasm module \
-    faerie umbrella simplejit
+    faerie umbrella simplejit object
 do
     echo cargo publish --manifest-path "cranelift-$crate/Cargo.toml"
 
     # Sleep for a few seconds to allow the server to update the index.
     # https://internals.rust-lang.org/t/changes-to-how-crates-io-handles-index-updates/9608
-    echo sleep 3
+    echo sleep 10
 done

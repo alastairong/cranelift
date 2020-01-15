@@ -7,8 +7,11 @@ use crate::match_directive::match_directive;
 use crate::subtest::{Context, SubTest, SubtestResult};
 use cranelift_codegen::binemit::{self, CodeInfo, CodeSink, RegDiversions};
 use cranelift_codegen::dbg::DisplayList;
+use cranelift_codegen::dominator_tree::DominatorTree;
+use cranelift_codegen::flowgraph::ControlFlowGraph;
 use cranelift_codegen::ir;
 use cranelift_codegen::ir::entities::AnyEntity;
+use cranelift_codegen::isa;
 use cranelift_codegen::print_errors::pretty_error;
 use cranelift_codegen::settings::OptLevel;
 use cranelift_reader::TestCommand;
@@ -87,6 +90,10 @@ impl binemit::CodeSink for TextSink {
         write!(self.text, ") ").unwrap();
     }
 
+    fn reloc_constant(&mut self, reloc: binemit::Reloc, constant: ir::ConstantOffset) {
+        write!(self.text, "{}({}) ", reloc, constant).unwrap();
+    }
+
     fn reloc_jt(&mut self, reloc: binemit::Reloc, jt: ir::JumpTable) {
         write!(self.text, "{}({}) ", reloc, jt).unwrap();
     }
@@ -98,9 +105,15 @@ impl binemit::CodeSink for TextSink {
     fn begin_jumptables(&mut self) {
         self.code_size = self.offset
     }
-
     fn begin_rodata(&mut self) {}
     fn end_codegen(&mut self) {}
+    fn add_stackmap(
+        &mut self,
+        _: &[ir::entities::Value],
+        _: &ir::Function,
+        _: &dyn isa::TargetIsa,
+    ) {
+    }
 }
 
 impl SubTest for TestBinEmit {
@@ -149,7 +162,7 @@ impl SubTest for TestBinEmit {
                                 recipe_constraints.satisfied(inst, &divert, &func)
                             });
 
-                        if opt_level == OptLevel::Best {
+                        if opt_level == OptLevel::SpeedAndSize {
                             // Get the smallest legal encoding
                             legal_encodings
                                 .min_by_key(|&e| encinfo.byte_size(e, inst, &divert, &func))
@@ -166,8 +179,11 @@ impl SubTest for TestBinEmit {
         }
 
         // Relax branches and compute EBB offsets based on the encodings.
-        let CodeInfo { total_size, .. } = binemit::relax_branches(&mut func, isa)
-            .map_err(|e| pretty_error(&func, context.isa, e))?;
+        let mut cfg = ControlFlowGraph::with_function(&func);
+        let mut domtree = DominatorTree::with_function(&func, &cfg);
+        let CodeInfo { total_size, .. } =
+            binemit::relax_branches(&mut func, &mut cfg, &mut domtree, isa)
+                .map_err(|e| pretty_error(&func, context.isa, e))?;
 
         // Collect all of the 'bin:' directives on instructions.
         let mut bins = HashMap::new();
@@ -215,18 +231,8 @@ impl SubTest for TestBinEmit {
                 // Send legal encodings into the emitter.
                 if enc.is_legal() {
                     // Generate a better error message if output locations are not specified.
-                    if let Some(&v) = func
-                        .dfg
-                        .inst_results(inst)
-                        .iter()
-                        .find(|&&v| !func.locations[v].is_assigned())
-                    {
-                        return Err(format!(
-                            "Missing register/stack slot for {} in {}",
-                            v,
-                            func.dfg.display_inst(inst, isa)
-                        ));
-                    }
+                    validate_location_annotations(&func, inst, isa, false)?;
+
                     let before = sink.offset;
                     isa.emit_inst(&func, inst, &mut divert, &mut sink);
                     let emitted = sink.offset - before;
@@ -244,19 +250,9 @@ impl SubTest for TestBinEmit {
                 if let Some(want) = bins.remove(&inst) {
                     if !enc.is_legal() {
                         // A possible cause of an unencoded instruction is a missing location for
-                        // one of the input operands.
-                        if let Some(&v) = func
-                            .dfg
-                            .inst_args(inst)
-                            .iter()
-                            .find(|&&v| !func.locations[v].is_assigned())
-                        {
-                            return Err(format!(
-                                "Missing register/stack slot for {} in {}",
-                                v,
-                                func.dfg.display_inst(inst, isa)
-                            ));
-                        }
+                        // one of the input/output operands.
+                        validate_location_annotations(&func, inst, isa, true)?;
+                        validate_location_annotations(&func, inst, isa, false)?;
 
                         // Do any encodings exist?
                         let encodings = isa
@@ -301,7 +297,13 @@ impl SubTest for TestBinEmit {
         }
 
         sink.begin_rodata();
-        // TODO: Read-only (constant pool) data.
+
+        // output constants
+        for (_, constant_data) in func.dfg.constants.iter() {
+            for byte in constant_data.iter() {
+                sink.put1(*byte)
+            }
+        }
 
         sink.end_codegen();
 
@@ -312,6 +314,30 @@ impl SubTest for TestBinEmit {
             ));
         }
 
+        Ok(())
+    }
+}
+
+/// Validate registers/stack slots are correctly annotated.
+fn validate_location_annotations(
+    func: &ir::Function,
+    inst: ir::Inst,
+    isa: &dyn isa::TargetIsa,
+    validate_inputs: bool,
+) -> SubtestResult<()> {
+    let values = if validate_inputs {
+        func.dfg.inst_args(inst)
+    } else {
+        func.dfg.inst_results(inst)
+    };
+
+    if let Some(&v) = values.iter().find(|&&v| !func.locations[v].is_assigned()) {
+        Err(format!(
+            "Need register/stack slot annotation for {} in {}",
+            v,
+            func.dfg.display_inst(inst, isa)
+        ))
+    } else {
         Ok(())
     }
 }

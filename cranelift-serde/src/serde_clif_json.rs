@@ -58,6 +58,11 @@ pub enum SerInstData {
         arg: String,
         lane: String,
     },
+    Shuffle {
+        opcode: String,
+        args: [String; 2],
+        mask: String,
+    },
     IntCompare {
         opcode: String,
         args: [String; 2],
@@ -210,6 +215,10 @@ pub enum SerInstData {
         src: String,
         dst: String,
     },
+    CopyToSsa {
+        opcode: String,
+        src: String,
+    },
     RegSpill {
         opcode: String,
         arg: String,
@@ -327,6 +336,28 @@ pub fn get_inst_data(inst_index: Inst, func: &Function) -> SerInstData {
             arg: arg.to_string(),
             lane: lane.to_string(),
         },
+        InstructionData::UnaryConst {
+            opcode,
+            constant_handle,
+        } => {
+            let constant = func.dfg.constants.get(constant_handle);
+            SerInstData::UnaryImm {
+                opcode: opcode.to_string(),
+                imm: format!("{:?}", constant),
+            }
+        }
+        InstructionData::Shuffle { opcode, args, mask } => {
+            let mask = func
+                .dfg
+                .immediates
+                .get(mask)
+                .expect("Expected shuffle mask to already be inserted in immediate mapping");
+            SerInstData::Shuffle {
+                opcode: opcode.to_string(),
+                args: [args[0].to_string(), args[1].to_string()],
+                mask: format!("{:?}", mask),
+            }
+        }
         InstructionData::IntCompare { opcode, args, cond } => {
             let hold_args = [args[0].to_string(), args[1].to_string()];
             SerInstData::IntCompare {
@@ -650,6 +681,10 @@ pub fn get_inst_data(inst_index: Inst, func: &Function) -> SerInstData {
             opcode: opcode.to_string(),
             src: src.to_string(),
             dst: dst.to_string(),
+        },
+        InstructionData::CopyToSsa { opcode, src } => SerInstData::CopyToSsa {
+            opcode: opcode.to_string(),
+            src: src.to_string(),
         },
         InstructionData::RegSpill {
             opcode,

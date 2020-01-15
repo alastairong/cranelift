@@ -11,11 +11,11 @@ use crate::Backend;
 use cranelift_codegen::binemit::{self, CodeInfo};
 use cranelift_codegen::entity::{entity_impl, PrimaryMap};
 use cranelift_codegen::{ir, isa, CodegenError, Context};
-use failure::Fail;
 use log::info;
 use std::borrow::ToOwned;
 use std::string::String;
 use std::vec::Vec;
+use thiserror::Error;
 
 /// A function identifier for use in the `Module` interface.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -25,7 +25,7 @@ entity_impl!(FuncId, "funcid");
 /// Function identifiers are namespace 0 in `ir::ExternalName`
 impl From<FuncId> for ir::ExternalName {
     fn from(id: FuncId) -> Self {
-        ir::ExternalName::User {
+        Self::User {
             namespace: 0,
             index: id.0,
         }
@@ -40,7 +40,7 @@ entity_impl!(DataId, "dataid");
 /// Data identifiers are namespace 1 in `ir::ExternalName`
 impl From<DataId> for ir::ExternalName {
     fn from(id: DataId) -> Self {
-        ir::ExternalName::User {
+        Self::User {
             namespace: 1,
             index: id.0,
         }
@@ -48,7 +48,7 @@ impl From<DataId> for ir::ExternalName {
 }
 
 /// Linkage refers to where an entity is defined and who can see it.
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Linkage {
     /// Defined outside of a module.
     Import,
@@ -63,33 +63,33 @@ pub enum Linkage {
 impl Linkage {
     fn merge(a: Self, b: Self) -> Self {
         match a {
-            Linkage::Export => Linkage::Export,
-            Linkage::Preemptible => match b {
-                Linkage::Export => Linkage::Export,
-                _ => Linkage::Preemptible,
+            Self::Export => Self::Export,
+            Self::Preemptible => match b {
+                Self::Export => Self::Export,
+                _ => Self::Preemptible,
             },
-            Linkage::Local => match b {
-                Linkage::Export => Linkage::Export,
-                Linkage::Preemptible => Linkage::Preemptible,
-                _ => Linkage::Local,
+            Self::Local => match b {
+                Self::Export => Self::Export,
+                Self::Preemptible => Self::Preemptible,
+                _ => Self::Local,
             },
-            Linkage::Import => b,
+            Self::Import => b,
         }
     }
 
     /// Test whether this linkage can have a definition.
     pub fn is_definable(self) -> bool {
         match self {
-            Linkage::Import => false,
-            Linkage::Local | Linkage::Preemptible | Linkage::Export => true,
+            Self::Import => false,
+            Self::Local | Self::Preemptible | Self::Export => true,
         }
     }
 
     /// Test whether this linkage will have a definition that cannot be preempted.
     pub fn is_final(self) -> bool {
         match self {
-            Linkage::Import | Linkage::Preemptible => false,
-            Linkage::Local | Linkage::Export => true,
+            Self::Import | Self::Preemptible => false,
+            Self::Local | Self::Export => true,
         }
     }
 }
@@ -121,32 +121,29 @@ pub struct FunctionDeclaration {
 }
 
 /// Error messages for all `Module` and `Backend` methods
-#[derive(Fail, Debug)]
+#[derive(Error, Debug)]
 pub enum ModuleError {
     /// Indicates an identifier was used before it was declared
-    #[fail(display = "Undeclared identifier: {}", _0)]
+    #[error("Undeclared identifier: {0}")]
     Undeclared(String),
     /// Indicates an identifier was used as data/function first, but then used as the other
-    #[fail(display = "Incompatible declaration of identifier: {}", _0)]
+    #[error("Incompatible declaration of identifier: {0}")]
     IncompatibleDeclaration(String),
     /// Indicates a function identifier was declared with a
     /// different signature than declared previously
-    #[fail(
-        display = "Function {} signature {:?} is incompatible with previous declaration {:?}",
-        _0, _2, _1
-    )]
+    #[error("Function {0} signature {2:?} is incompatible with previous declaration {1:?}")]
     IncompatibleSignature(String, ir::Signature, ir::Signature),
     /// Indicates an identifier was defined more than once
-    #[fail(display = "Duplicate definition of identifier: {}", _0)]
+    #[error("Duplicate definition of identifier: {0}")]
     DuplicateDefinition(String),
     /// Indicates an identifier was defined, but was declared as an import
-    #[fail(display = "Invalid to define identifier declared as an import: {}", _0)]
+    #[error("Invalid to define identifier declared as an import: {0}")]
     InvalidImportDefinition(String),
     /// Wraps a `cranelift-codegen` error
-    #[fail(display = "Compilation error: {}", _0)]
-    Compilation(CodegenError),
+    #[error("Compilation error: {0}")]
+    Compilation(#[from] CodegenError),
     /// Wraps a generic error from a backend
-    #[fail(display = "Backend error: {}", _0)]
+    #[error("Backend error: {0}")]
     Backend(String),
 }
 
@@ -224,25 +221,31 @@ impl<B> ModuleContents<B>
 where
     B: Backend,
 {
-    fn get_function_info(&self, name: &ir::ExternalName) -> &ModuleFunction<B> {
+    fn get_function_id(&self, name: &ir::ExternalName) -> FuncId {
         if let ir::ExternalName::User { namespace, index } = *name {
             debug_assert_eq!(namespace, 0);
-            let func = FuncId::from_u32(index);
-            &self.functions[func]
+            FuncId::from_u32(index)
         } else {
             panic!("unexpected ExternalName kind {}", name)
         }
     }
 
-    /// Get the `DataDeclaration` for the function named by `name`.
-    fn get_data_info(&self, name: &ir::ExternalName) -> &ModuleData<B> {
+    fn get_data_id(&self, name: &ir::ExternalName) -> DataId {
         if let ir::ExternalName::User { namespace, index } = *name {
             debug_assert_eq!(namespace, 1);
-            let data = DataId::from_u32(index);
-            &self.data_objects[data]
+            DataId::from_u32(index)
         } else {
             panic!("unexpected ExternalName kind {}", name)
         }
+    }
+
+    fn get_function_info(&self, name: &ir::ExternalName) -> &ModuleFunction<B> {
+        &self.functions[self.get_function_id(name)]
+    }
+
+    /// Get the `DataDeclaration` for the function named by `name`.
+    fn get_data_info(&self, name: &ir::ExternalName) -> &ModuleData<B> {
+        &self.data_objects[self.get_data_id(name)]
     }
 }
 
@@ -259,12 +262,22 @@ impl<'a, B> ModuleNamespace<'a, B>
 where
     B: Backend,
 {
+    /// Get the `FuncId` for the function named by `name`.
+    pub fn get_function_id(&self, name: &ir::ExternalName) -> FuncId {
+        self.contents.get_function_id(name)
+    }
+
+    /// Get the `DataId` for the data object named by `name`.
+    pub fn get_data_id(&self, name: &ir::ExternalName) -> DataId {
+        self.contents.get_data_id(name)
+    }
+
     /// Get the `FunctionDeclaration` for the function named by `name`.
     pub fn get_function_decl(&self, name: &ir::ExternalName) -> &FunctionDeclaration {
         &self.contents.get_function_info(name).decl
     }
 
-    /// Get the `DataDeclaration` for the function named by `name`.
+    /// Get the `DataDeclaration` for the data object named by `name`.
     pub fn get_data_decl(&self, name: &ir::ExternalName) -> &DataDeclaration {
         &self.contents.get_data_info(name).decl
     }
@@ -407,7 +420,8 @@ where
                 FuncOrDataId::Func(id) => {
                     let existing = &mut self.contents.functions[id];
                     existing.merge(linkage, signature)?;
-                    self.backend.declare_function(name, existing.decl.linkage);
+                    self.backend
+                        .declare_function(id, name, existing.decl.linkage);
                     Ok(id)
                 }
                 FuncOrDataId::Data(..) => {
@@ -424,7 +438,7 @@ where
                     compiled: None,
                 });
                 entry.insert(FuncOrDataId::Func(id));
-                self.backend.declare_function(name, linkage);
+                self.backend.declare_function(id, name, linkage);
                 Ok(id)
             }
         }
@@ -451,6 +465,7 @@ where
                     let existing = &mut self.contents.data_objects[id];
                     existing.merge(linkage, writable, align);
                     self.backend.declare_data(
+                        id,
                         name,
                         existing.decl.linkage,
                         existing.decl.writable,
@@ -474,7 +489,8 @@ where
                     compiled: None,
                 });
                 entry.insert(FuncOrDataId::Data(id));
-                self.backend.declare_data(name, linkage, writable, align);
+                self.backend
+                    .declare_data(id, name, linkage, writable, align);
                 Ok(id)
             }
         }
@@ -528,15 +544,12 @@ where
         func: FuncId,
         ctx: &mut Context,
     ) -> ModuleResult<binemit::CodeOffset> {
-        let CodeInfo { total_size, .. } = ctx.compile(self.backend.isa()).map_err(|e| {
-            info!(
-                "defining function {}: {}",
-                func,
-                ctx.func.display(self.backend.isa())
-            );
-            ModuleError::Compilation(e)
-        })?;
-
+        info!(
+            "defining function {}: {}",
+            func,
+            ctx.func.display(self.backend.isa())
+        );
+        let CodeInfo { total_size, .. } = ctx.compile(self.backend.isa())?;
         let info = &self.contents.functions[func];
         if info.compiled.is_some() {
             return Err(ModuleError::DuplicateDefinition(info.decl.name.clone()));
@@ -546,6 +559,7 @@ where
         }
 
         let compiled = Some(self.backend.define_function(
+            func,
             &info.decl.name,
             ctx,
             &ModuleNamespace::<B> {
@@ -559,7 +573,7 @@ where
         Ok(total_size)
     }
 
-    /// Define a function, producing the data contents from the given `DataContext`.
+    /// Define a data object, producing the data contents from the given `DataContext`.
     pub fn define_data(&mut self, data: DataId, data_ctx: &DataContext) -> ModuleResult<()> {
         let compiled = {
             let info = &self.contents.data_objects[data];
@@ -570,6 +584,7 @@ where
                 return Err(ModuleError::InvalidImportDefinition(info.decl.name.clone()));
             }
             Some(self.backend.define_data(
+                data,
                 &info.decl.name,
                 info.decl.writable,
                 info.decl.align,
@@ -638,6 +653,7 @@ where
             let info = &self.contents.functions[func];
             debug_assert!(info.decl.linkage.is_definable());
             self.backend.finalize_function(
+                func,
                 info.compiled
                     .as_ref()
                     .expect("function must be compiled before it can be finalized"),
@@ -650,6 +666,7 @@ where
             let info = &self.contents.data_objects[data];
             debug_assert!(info.decl.linkage.is_definable());
             self.backend.finalize_data(
+                data,
                 info.compiled
                     .as_ref()
                     .expect("data object must be compiled before it can be finalized"),
@@ -697,7 +714,8 @@ where
     /// Consume the module and return the resulting `Product`. Some `Backend`
     /// implementations may provide additional functionality available after
     /// a `Module` is complete.
-    pub fn finish(self) -> B::Product {
+    pub fn finish(mut self) -> B::Product {
+        self.finalize_definitions();
         self.backend.finish()
     }
 }

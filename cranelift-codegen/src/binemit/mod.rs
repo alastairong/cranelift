@@ -6,14 +6,22 @@
 mod memorysink;
 mod relaxation;
 mod shrink;
+mod stackmap;
 
-pub use self::memorysink::{MemoryCodeSink, NullTrapSink, RelocSink, TrapSink};
+pub use self::memorysink::{
+    MemoryCodeSink, NullRelocSink, NullStackmapSink, NullTrapSink, RelocSink, StackmapSink,
+    TrapSink,
+};
 pub use self::relaxation::relax_branches;
 pub use self::shrink::shrink_instructions;
+pub use self::stackmap::Stackmap;
+use crate::ir::entities::Value;
+use crate::ir::{ConstantOffset, ExternalName, Function, Inst, JumpTable, SourceLoc, TrapCode};
+use crate::isa::TargetIsa;
 pub use crate::regalloc::RegDiversions;
-
-use crate::ir::{ExternalName, Function, Inst, JumpTable, SourceLoc, TrapCode};
 use core::fmt;
+#[cfg(feature = "enable-serde")]
+use serde::{Deserialize, Serialize};
 
 /// Offset in bytes from the beginning of the function.
 ///
@@ -25,7 +33,8 @@ pub type CodeOffset = u32;
 pub type Addend = i64;
 
 /// Relocation kinds for every ISA
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub enum Reloc {
     /// absolute 4-byte
     Abs4,
@@ -54,14 +63,14 @@ impl fmt::Display for Reloc {
     /// already unambiguous, e.g. clif syntax with isa specified. In other contexts, use Debug.
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
-            Reloc::Abs4 => write!(f, "Abs4"),
-            Reloc::Abs8 => write!(f, "Abs8"),
-            Reloc::X86PCRel4 => write!(f, "PCRel4"),
-            Reloc::X86PCRelRodata4 => write!(f, "PCRelRodata4"),
-            Reloc::X86CallPCRel4 => write!(f, "CallPCRel4"),
-            Reloc::X86CallPLTRel4 => write!(f, "CallPLTRel4"),
-            Reloc::X86GOTPCRel4 => write!(f, "GOTPCRel4"),
-            Reloc::Arm32Call | Reloc::Arm64Call | Reloc::RiscvCall => write!(f, "Call"),
+            Self::Abs4 => write!(f, "Abs4"),
+            Self::Abs8 => write!(f, "Abs8"),
+            Self::X86PCRel4 => write!(f, "PCRel4"),
+            Self::X86PCRelRodata4 => write!(f, "PCRelRodata4"),
+            Self::X86CallPCRel4 => write!(f, "CallPCRel4"),
+            Self::X86CallPLTRel4 => write!(f, "CallPLTRel4"),
+            Self::X86GOTPCRel4 => write!(f, "GOTPCRel4"),
+            Self::Arm32Call | Self::Arm64Call | Self::RiscvCall => write!(f, "Call"),
         }
     }
 }
@@ -124,6 +133,9 @@ pub trait CodeSink {
     /// Add a relocation referencing an external symbol plus the addend at the current offset.
     fn reloc_external(&mut self, _: Reloc, _: &ExternalName, _: Addend);
 
+    /// Add a relocation referencing a constant.
+    fn reloc_constant(&mut self, _: Reloc, _: ConstantOffset);
+
     /// Add a relocation referencing a jump table.
     fn reloc_jt(&mut self, _: Reloc, _: JumpTable);
 
@@ -138,6 +150,9 @@ pub trait CodeSink {
 
     /// Read-only data output is complete, we're done.
     fn end_codegen(&mut self);
+
+    /// Add a stackmap at the current code offset.
+    fn add_stackmap(&mut self, _: &[Value], _: &Function, _: &dyn TargetIsa);
 }
 
 /// Report a bad encoding error.
@@ -154,23 +169,23 @@ pub fn bad_encoding(func: &Function, inst: Inst) -> ! {
 ///
 /// This function is called from the `TargetIsa::emit_function()` implementations with the
 /// appropriate instruction emitter.
-pub fn emit_function<CS, EI>(func: &Function, emit_inst: EI, sink: &mut CS)
+pub fn emit_function<CS, EI>(func: &Function, emit_inst: EI, sink: &mut CS, isa: &dyn TargetIsa)
 where
     CS: CodeSink,
-    EI: Fn(&Function, Inst, &mut RegDiversions, &mut CS),
+    EI: Fn(&Function, Inst, &mut RegDiversions, &mut CS, &dyn TargetIsa),
 {
     let mut divert = RegDiversions::new();
     for ebb in func.layout.ebbs() {
-        divert.clear();
+        divert.at_ebb(&func.entry_diversions, ebb);
         debug_assert_eq!(func.offsets[ebb], sink.offset());
         for inst in func.layout.ebb_insts(ebb) {
-            emit_inst(func, inst, &mut divert, sink);
+            emit_inst(func, inst, &mut divert, sink, isa);
         }
     }
 
     sink.begin_jumptables();
 
-    // output jump tables
+    // Output jump tables.
     for (jt, jt_data) in func.jump_tables.iter() {
         let jt_offset = func.jt_offsets[jt];
         for ebb in jt_data.iter() {
@@ -180,7 +195,13 @@ where
     }
 
     sink.begin_rodata();
-    // TODO: No read-only data (constant pools) at this time.
+
+    // Output constants.
+    for (_, constant_data) in func.dfg.constants.iter() {
+        for byte in constant_data.iter() {
+            sink.put1(*byte)
+        }
+    }
 
     sink.end_codegen();
 }

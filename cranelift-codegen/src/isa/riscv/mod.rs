@@ -15,8 +15,9 @@ use crate::isa::enc_tables::{self as shared_enc_tables, lookup_enclist, Encoding
 use crate::isa::Builder as IsaBuilder;
 use crate::isa::{EncInfo, RegClass, RegInfo, TargetIsa};
 use crate::regalloc;
+use alloc::borrow::Cow;
+use alloc::boxed::Box;
 use core::fmt;
-use std::boxed::Box;
 use target_lexicon::{PointerWidth, Triple};
 
 #[allow(dead_code)]
@@ -95,7 +96,7 @@ impl TargetIsa for Isa {
         )
     }
 
-    fn legalize_signature(&self, sig: &mut ir::Signature, current: bool) {
+    fn legalize_signature(&self, sig: &mut Cow<ir::Signature>, current: bool) {
         abi::legalize_signature(sig, &self.triple, &self.isa_flags, current)
     }
 
@@ -115,11 +116,19 @@ impl TargetIsa for Isa {
         divert: &mut regalloc::RegDiversions,
         sink: &mut dyn CodeSink,
     ) {
-        binemit::emit_inst(func, inst, divert, sink)
+        binemit::emit_inst(func, inst, divert, sink, self)
     }
 
     fn emit_function_to_memory(&self, func: &ir::Function, sink: &mut MemoryCodeSink) {
-        emit_function(func, binemit::emit_inst, sink)
+        emit_function(func, binemit::emit_inst, sink, self)
+    }
+
+    fn unsigned_add_overflow_condition(&self) -> ir::condcodes::IntCC {
+        unimplemented!()
+    }
+
+    fn unsigned_sub_overflow_condition(&self) -> ir::condcodes::IntCC {
+        unimplemented!()
     }
 }
 
@@ -129,8 +138,8 @@ mod tests {
     use crate::ir::{Function, InstructionData, Opcode};
     use crate::isa;
     use crate::settings::{self, Configurable};
+    use alloc::string::{String, ToString};
     use core::str::FromStr;
-    use std::string::{String, ToString};
     use target_lexicon::triple;
 
     fn encstr(isa: &dyn isa::TargetIsa, enc: Result<isa::Encoding, isa::Legalize>) -> String {

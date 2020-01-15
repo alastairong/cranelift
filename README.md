@@ -1,18 +1,21 @@
 Cranelift Code Generator
 ========================
 
-**This is a (hopefully short-lived) fork** of [Cranelift](https://github.com/CraneStation/cranelift) so that we can continue publishing Wasmer runtime related crates on crates.io. If you're reading this and want to use Cranelift, you almost certainly want to use [the version this is forked from](https://github.com/CraneStation/cranelift). If you're associated with Cranelift and would like to merge any changes we have, please reach out to us at engineering@wasmer.io. We'll be submitting pull requests, too.
+**This is a (hopefully short-lived) fork** of [Cranelift](https://github.com/CraneStation/cranelift) so that we can continue publishing Wasmer runtime related crates on crates.io. If you're reading this and want to use Cranelift, you almost certainly want to use [the version this is forked from](https://github.com/CraneStation/cranelift). If you're associated with Cranelift and would like to merge any changes we have, please reach out to us at engineering@wasmer.io. We hope to submit pull requests too.
+
+**A [Bytecode Alliance][BA] project**
 
 Cranelift is a low-level retargetable code generator. It translates a
 [target-independent intermediate
 representation](https://cranelift.readthedocs.io/en/latest/ir.html)
 into executable machine code.
 
+[BA]: https://bytecodealliance.org/
 [![Documentation Status](https://readthedocs.org/projects/cranelift/badge/?version=latest)](https://cranelift.readthedocs.io/en/latest/?badge=latest)
-[![Travis Status](https://travis-ci.org/CraneStation/cranelift.svg?branch=master)](https://travis-ci.org/CraneStation/cranelift)
-[![Appveyor Status](https://ci.appveyor.com/api/projects/status/oub7wrrb59utuv8x?svg=true)](https://ci.appveyor.com/project/CraneStation/cranelift)
-[![Gitter chat](https://badges.gitter.im/CraneStation/CraneStation.svg)](https://gitter.im/CraneStation/Lobby)
-![Minimum rustc 1.34](https://img.shields.io/badge/rustc-1.34+-green.svg)
+[![Build Status](https://github.com/bytecodealliance/cranelift/workflows/CI/badge.svg)](https://github.com/bytecodealliance/cranelift/actions)
+[![Fuzzit Status](https://app.fuzzit.dev/badge?org_id=bytecodealliance)](https://app.fuzzit.dev/orgs/bytecodealliance/dashboard)
+[![Gitter chat](https://badges.gitter.im/bytecodealliance/bytecodealliance.svg)](https://gitter.im/CraneStation/Lobby)
+![Minimum rustc 1.37](https://img.shields.io/badge/rustc-1.37+-green.svg)
 
 For more information, see [the
 documentation](https://cranelift.readthedocs.io/en/latest/?badge=latest).
@@ -20,12 +23,12 @@ documentation](https://cranelift.readthedocs.io/en/latest/?badge=latest).
 For an example of how to use the JIT, see the [SimpleJIT Demo], which
 implements a toy language.
 
-[SimpleJIT Demo]: https://github.com/CraneStation/simplejit-demo
+[SimpleJIT Demo]: https://github.com/bytecodealliance/simplejit-demo
 
 For an example of how to use Cranelift to run WebAssembly code, see
 [Wasmtime], which implements a standalone, embeddable, VM using Cranelift.
 
-[Wasmtime]: https://github.com/CraneStation/wasmtime
+[Wasmtime]: https://github.com/bytecodealliance/wasmtime
 
 Status
 ------
@@ -55,8 +58,14 @@ needed before it would be ready for a production use case.
 
 Cranelift's APIs are not yet stable.
 
-Cranelift currently requires Rust 1.32 or later, and Python 2.7 or 3
-to build.
+Cranelift currently requires Rust 1.37 or later to build.
+
+Contributing
+------------
+
+If you're interested in contributing to Cranelift: thank you! We have a
+[contributing guide](CONTRIBUTING.md) which will help you getting involved in
+the Cranelift project.
 
 Planned uses
 ------------
@@ -70,7 +79,7 @@ affected its design are:
  - [Backend for the IonMonkey JavaScript JIT compiler in
     Firefox](spidermonkey.md#phase-2-ionmonkey).
  - [Debug build backend for the Rust compiler](rustc.md).
- - [Wasmtime non-Web wasm engine](https://github.com/CraneStation/wasmtime).
+ - [Wasmtime non-Web wasm engine](https://github.com/bytecodealliance/wasmtime).
 
 Building Cranelift
 ------------------
@@ -173,4 +182,4 @@ Editor Support
 
 Editor support for working with Cranelift IR (clif) files:
 
- - Vim: https://github.com/CraneStation/cranelift.vim
+ - Vim: https://github.com/bytecodealliance/cranelift.vim

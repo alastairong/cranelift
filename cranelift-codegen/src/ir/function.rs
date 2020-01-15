@@ -8,16 +8,19 @@ use crate::entity::{PrimaryMap, SecondaryMap};
 use crate::ir;
 use crate::ir::{DataFlowGraph, ExternalName, Layout, Signature};
 use crate::ir::{
-    Ebb, ExtFuncData, FuncRef, GlobalValue, GlobalValueData, Heap, HeapData, JumpTable,
+    Ebb, ExtFuncData, FuncRef, GlobalValue, GlobalValueData, Heap, HeapData, Inst, JumpTable,
     JumpTableData, SigRef, StackSlot, StackSlotData, Table, TableData,
 };
-use crate::ir::{EbbOffsets, InstEncodings, SourceLocs, StackSlots, ValueLocations};
+use crate::ir::{EbbOffsets, FrameLayout, InstEncodings, SourceLocs, StackSlots, ValueLocations};
 use crate::ir::{JumpTableOffsets, JumpTables};
 use crate::isa::{CallConv, EncInfo, Encoding, Legalize, TargetIsa};
-use crate::regalloc::RegDiversions;
+use crate::regalloc::{EntryRegDiversions, RegDiversions};
 use crate::value_label::ValueLabelsRanges;
 use crate::write::write_function;
 use core::fmt;
+
+#[cfg(feature = "basic-blocks")]
+use crate::ir::Opcode;
 
 /// A function.
 ///
@@ -30,6 +33,10 @@ pub struct Function {
 
     /// Signature of this function.
     pub signature: Signature,
+
+    /// The old signature of this function, before the most recent legalization,
+    /// if any.
+    pub old_signature: Option<Signature>,
 
     /// Stack slots allocated in this function.
     pub stack_slots: StackSlots,
@@ -59,6 +66,12 @@ pub struct Function {
     /// Location assigned to every value.
     pub locations: ValueLocations,
 
+    /// Non-default locations assigned to value at the entry of basic blocks.
+    ///
+    /// At the entry of each basic block, we might have values which are not in their default
+    /// ValueLocation. This field records these register-to-register moves as Diversions.
+    pub entry_diversions: EntryRegDiversions,
+
     /// Code offsets of the EBB headers.
     ///
     /// This information is only transiently available after the `binemit::relax_branches` function
@@ -74,6 +87,18 @@ pub struct Function {
     /// Track the original source location for each instruction. The source locations are not
     /// interpreted by Cranelift, only preserved.
     pub srclocs: SourceLocs,
+
+    /// Instruction that marks the end (inclusive) of the function's prologue.
+    ///
+    /// This is used for some calling conventions to track the end of unwind information.
+    pub prologue_end: Option<Inst>,
+
+    /// Frame layout for the instructions.
+    ///
+    /// The stack unwinding requires to have information about which registers and where they
+    /// are saved in the frame. This information is created during the prologue and epilogue
+    /// passes.
+    pub frame_layout: Option<FrameLayout>,
 }
 
 impl Function {
@@ -82,6 +107,7 @@ impl Function {
         Self {
             name,
             signature: sig,
+            old_signature: None,
             stack_slots: StackSlots::new(),
             global_values: PrimaryMap::new(),
             heaps: PrimaryMap::new(),
@@ -91,9 +117,12 @@ impl Function {
             layout: Layout::new(),
             encodings: SecondaryMap::new(),
             locations: SecondaryMap::new(),
+            entry_diversions: EntryRegDiversions::new(),
             offsets: SecondaryMap::new(),
             jt_offsets: SecondaryMap::new(),
             srclocs: SecondaryMap::new(),
+            prologue_end: None,
+            frame_layout: None,
         }
     }
 
@@ -109,8 +138,12 @@ impl Function {
         self.layout.clear();
         self.encodings.clear();
         self.locations.clear();
+        self.entry_diversions.clear();
         self.offsets.clear();
+        self.jt_offsets.clear();
         self.srclocs.clear();
+        self.prologue_end = None;
+        self.frame_layout = None;
     }
 
     /// Create a new empty, anonymous function with a Fast calling convention.
@@ -194,10 +227,12 @@ impl Function {
             !self.offsets.is_empty(),
             "Code layout must be computed first"
         );
+        let mut divert = RegDiversions::new();
+        divert.at_ebb(&self.entry_diversions, ebb);
         InstOffsetIter {
             encinfo: encinfo.clone(),
             func: self,
-            divert: RegDiversions::new(),
+            divert,
             encodings: &self.encodings,
             offset: self.offsets[ebb],
             iter: self.layout.ebb_insts(ebb),
@@ -218,26 +253,60 @@ impl Function {
     /// Starts collection of debug information.
     pub fn collect_debug_info(&mut self) {
         self.dfg.collect_debug_info();
+        self.frame_layout = Some(FrameLayout::new());
+    }
+
+    /// Changes the destination of a jump or branch instruction.
+    /// Does nothing if called with a non-jump or non-branch instruction.
+    pub fn change_branch_destination(&mut self, inst: Inst, new_dest: Ebb) {
+        match self.dfg[inst].branch_destination_mut() {
+            None => (),
+            Some(inst_dest) => *inst_dest = new_dest,
+        }
+    }
+
+    /// Checks that the specified EBB can be encoded as a basic block.
+    ///
+    /// On error, returns the first invalid instruction and an error message.
+    #[cfg(feature = "basic-blocks")]
+    pub fn is_ebb_basic(&self, ebb: Ebb) -> Result<(), (Inst, &'static str)> {
+        let dfg = &self.dfg;
+        let inst_iter = self.layout.ebb_insts(ebb);
+
+        // Ignore all instructions prior to the first branch.
+        let mut inst_iter = inst_iter.skip_while(|&inst| !dfg[inst].opcode().is_branch());
+
+        // A conditional branch is permitted in a basic block only when followed
+        // by a terminal jump or fallthrough instruction.
+        if let Some(_branch) = inst_iter.next() {
+            if let Some(next) = inst_iter.next() {
+                match dfg[next].opcode() {
+                    Opcode::Fallthrough | Opcode::Jump => (),
+                    _ => return Err((next, "post-branch instruction not fallthrough or jump")),
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Returns true if the function is function that doesn't call any other functions. This is not
+    /// to be confused with a "leaf function" in Windows terminology.
+    pub fn is_leaf(&self) -> bool {
+        // Conservative result: if there's at least one function signature referenced in this
+        // function, assume it may call.
+        !self.dfg.signatures.is_empty()
     }
 }
 
 /// Additional annotations for function display.
+#[derive(Default)]
 pub struct DisplayFunctionAnnotations<'a> {
     /// Enable ISA annotations.
     pub isa: Option<&'a dyn TargetIsa>,
 
     /// Enable value labels annotations.
     pub value_ranges: Option<&'a ValueLabelsRanges>,
-}
-
-impl<'a> DisplayFunctionAnnotations<'a> {
-    /// Create a DisplayFunctionAnnotations with all fields set to None.
-    pub fn default() -> Self {
-        DisplayFunctionAnnotations {
-            isa: None,
-            value_ranges: None,
-        }
-    }
 }
 
 impl<'a> From<Option<&'a dyn TargetIsa>> for DisplayFunctionAnnotations<'a> {

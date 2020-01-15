@@ -12,10 +12,10 @@ use crate::ir::{
 use crate::isa::{RegInfo, TargetIsa};
 use crate::packed_option::ReservedValue;
 use crate::value_label::ValueLabelsRanges;
+use crate::HashSet;
+use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt::{self, Write};
-use std::collections::HashSet;
-use std::string::String;
-use std::vec::Vec;
 
 /// A `FuncWriter` used to decorate functions during printing.
 pub trait FuncWriter {
@@ -268,9 +268,9 @@ pub fn write_ebb_header(
     writeln!(w, "):")
 }
 
-fn write_valueloc(w: &mut dyn Write, loc: &ValueLoc, regs: &RegInfo) -> fmt::Result {
+fn write_valueloc(w: &mut dyn Write, loc: ValueLoc, regs: &RegInfo) -> fmt::Result {
     match loc {
-        ValueLoc::Reg(r) => write!(w, "{}", regs.display_regunit(*r)),
+        ValueLoc::Reg(r) => write!(w, "{}", regs.display_regunit(r)),
         ValueLoc::Stack(ss) => write!(w, "{}", ss),
         ValueLoc::Unassigned => write!(w, "?"),
     }
@@ -289,7 +289,7 @@ fn write_value_range_markers(
         for i in (0..rng.len()).rev() {
             if rng[i].start == offset {
                 write!(&mut result, " {}@", val)?;
-                write_valueloc(&mut result, &rng[i].loc, regs)?;
+                write_valueloc(&mut result, rng[i].loc, regs)?;
                 shown.insert(val);
                 break;
             }
@@ -303,7 +303,7 @@ fn write_value_range_markers(
             }
         }
     }
-    if result.len() > 0 {
+    if !result.is_empty() {
         writeln!(w, ";{1:0$}; {2}", indent + 24, "", result)?;
     }
     Ok(())
@@ -330,21 +330,24 @@ fn decorate_ebb<FW: FuncWriter>(
         write_value_aliases(w, aliases, a, indent)?;
     }
 
-    if isa.is_some() && !func.offsets.is_empty() {
-        let encinfo = isa.unwrap().encoding_info();
-        let regs = &isa.unwrap().register_info();
-        for (offset, inst, size) in func.inst_offsets(ebb, &encinfo) {
-            func_w.write_instruction(w, func, aliases, isa, inst, indent)?;
-            if size > 0 {
-                if let Some(val_ranges) = annotations.value_ranges {
-                    write_value_range_markers(w, val_ranges, regs, offset + size, indent)?;
+    if let Some(isa) = isa {
+        if !func.offsets.is_empty() {
+            let encinfo = isa.encoding_info();
+            let regs = &isa.register_info();
+            for (offset, inst, size) in func.inst_offsets(ebb, &encinfo) {
+                func_w.write_instruction(w, func, aliases, Some(isa), inst, indent)?;
+                if size > 0 {
+                    if let Some(val_ranges) = annotations.value_ranges {
+                        write_value_range_markers(w, val_ranges, regs, offset + size, indent)?;
+                    }
                 }
             }
+            return Ok(());
         }
-    } else {
-        for inst in func.layout.ebb_insts(ebb) {
-            func_w.write_instruction(w, func, aliases, isa, inst, indent)?;
-        }
+    }
+
+    for inst in func.layout.ebb_insts(ebb) {
+        func_w.write_instruction(w, func, aliases, isa, inst, indent)?;
     }
 
     Ok(())
@@ -504,6 +507,18 @@ pub fn write_operands(
         NullAry { .. } => write!(w, " "),
         InsertLane { lane, args, .. } => write!(w, " {}, {}, {}", args[0], lane, args[1]),
         ExtractLane { lane, arg, .. } => write!(w, " {}, {}", arg, lane),
+        UnaryConst {
+            constant_handle, ..
+        } => {
+            let constant_data = dfg.constants.get(constant_handle);
+            write!(w, " {}", constant_data)
+        }
+        Shuffle { mask, args, .. } => {
+            let data = dfg.immediates.get(mask).expect(
+                "Expected the shuffle mask to already be inserted into the immediates table",
+            );
+            write!(w, " {}, {}, {}", args[0], args[1], data)
+        }
         IntCompare { cond, args, .. } => write!(w, " {} {}, {}", cond, args[0], args[1]),
         IntCompareImm { cond, arg, imm, .. } => write!(w, " {} {}, {}", cond, arg, imm),
         IntCond { cond, arg, .. } => write!(w, " {} {}", cond, arg),
@@ -664,6 +679,14 @@ pub fn write_operands(
                 write!(w, " %{} -> %{}", src, dst)
             }
         }
+        CopyToSsa { src, .. } => {
+            if let Some(isa) = isa {
+                let regs = isa.register_info();
+                write!(w, " {}", regs.display_regunit(src))
+            } else {
+                write!(w, " %{}", src)
+            }
+        }
         RegSpill { arg, src, dst, .. } => {
             if let Some(isa) = isa {
                 let regs = isa.register_info();
@@ -736,7 +759,7 @@ mod tests {
     use crate::cursor::{Cursor, CursorPosition, FuncCursor};
     use crate::ir::types;
     use crate::ir::{ExternalName, Function, InstBuilder, StackSlotData, StackSlotKind};
-    use std::string::ToString;
+    use alloc::string::ToString;
 
     #[test]
     fn basic() {

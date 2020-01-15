@@ -5,9 +5,10 @@
 //! WebAssembly module and the runtime environment.
 
 use crate::code_translator::translate_operator;
-use crate::environ::{FuncEnvironment, ReturnMode, WasmError, WasmResult};
-use crate::state::TranslationState;
+use crate::environ::{FuncEnvironment, ReturnMode, WasmResult};
+use crate::state::{FuncTranslationState, ModuleTranslationState};
 use crate::translation_utils::get_vmctx_value_label;
+use crate::wasm_unsupported;
 use cranelift_codegen::entity::EntityRef;
 use cranelift_codegen::ir::{self, Ebb, InstBuilder, ValueLabel};
 use cranelift_codegen::timing;
@@ -24,7 +25,7 @@ pub struct FuncTranslator {
     /// Func ctx
     pub func_ctx: FunctionBuilderContext,
     /// Translation state
-    pub state: TranslationState,
+    pub state: FuncTranslationState,
 }
 
 impl FuncTranslator {
@@ -32,7 +33,7 @@ impl FuncTranslator {
     pub fn new() -> Self {
         Self {
             func_ctx: FunctionBuilderContext::new(),
-            state: TranslationState::new(),
+            state: FuncTranslationState::new(),
         }
     }
 
@@ -56,12 +57,14 @@ impl FuncTranslator {
     ///
     pub fn translate<FE: FuncEnvironment + ?Sized>(
         &mut self,
+        module_translation_state: &ModuleTranslationState,
         code: &[u8],
         code_offset: usize,
         func: &mut ir::Function,
         environ: &mut FE,
     ) -> WasmResult<()> {
         self.translate_from_reader(
+            module_translation_state,
             BinaryReader::new_with_offset(code, code_offset),
             func,
             environ,
@@ -71,6 +74,7 @@ impl FuncTranslator {
     /// Translate a binary WebAssembly function from a `BinaryReader`.
     pub fn translate_from_reader<FE: FuncEnvironment + ?Sized>(
         &mut self,
+        module_translation_state: &ModuleTranslationState,
         mut reader: BinaryReader,
         func: &mut ir::Function,
         environ: &mut FE,
@@ -92,7 +96,8 @@ impl FuncTranslator {
         let entry_block = builder.create_ebb();
         builder.append_ebb_params_for_function_params(entry_block);
         builder.switch_to_block(entry_block); // This also creates values for the arguments.
-        builder.seal_block(entry_block);
+        builder.seal_block(entry_block); // Declare all predecessors known.
+
         // Make sure the entry block is inserted in the layout before we make any callbacks to
         // `environ`. The callback functions may need to insert things in the entry block.
         builder.ensure_inserted_ebb();
@@ -105,8 +110,14 @@ impl FuncTranslator {
         builder.append_ebb_params_for_function_returns(exit_block);
         self.state.initialize(&builder.func.signature, exit_block);
 
-        parse_local_decls(&mut reader, &mut builder, num_params)?;
-        parse_function_body(reader, &mut builder, &mut self.state, environ)?;
+        parse_local_decls(&mut reader, &mut builder, num_params, environ)?;
+        parse_function_body(
+            module_translation_state,
+            reader,
+            &mut builder,
+            &mut self.state,
+            environ,
+        )?;
 
         builder.finalize();
         Ok(())
@@ -144,10 +155,11 @@ fn declare_wasm_parameters(builder: &mut FunctionBuilder, entry_block: Ebb) -> u
 /// Parse the local variable declarations that precede the function body.
 ///
 /// Declare local variables, starting from `num_params`.
-fn parse_local_decls(
+fn parse_local_decls<FE: FuncEnvironment + ?Sized>(
     reader: &mut BinaryReader,
     builder: &mut FunctionBuilder,
     num_params: usize,
+    environ: &mut FE,
 ) -> WasmResult<()> {
     let mut next_local = num_params;
     let local_count = reader.read_local_count()?;
@@ -156,7 +168,7 @@ fn parse_local_decls(
     for _ in 0..local_count {
         builder.set_srcloc(cur_srcloc(reader));
         let (count, ty) = reader.read_local_decl(&mut locals_total)?;
-        declare_locals(builder, count, ty, &mut next_local)?;
+        declare_locals(builder, count, ty, &mut next_local, environ)?;
     }
 
     Ok(())
@@ -165,11 +177,12 @@ fn parse_local_decls(
 /// Declare `count` local variables of the same type, starting from `next_local`.
 ///
 /// Fail of too many locals are declared in the function, or if the type is not valid for a local.
-pub fn declare_locals(
+pub fn declare_locals<FE: FuncEnvironment + ?Sized>(
     builder: &mut FunctionBuilder,
     count: u32,
     wasm_type: wasmparser::Type,
     next_local: &mut usize,
+    environ: &mut FE,
 ) -> WasmResult<()> {
     // All locals are initialized to 0.
     use wasmparser::Type::*;
@@ -178,7 +191,13 @@ pub fn declare_locals(
         I64 => builder.ins().iconst(ir::types::I64, 0),
         F32 => builder.ins().f32const(ir::immediates::Ieee32::with_bits(0)),
         F64 => builder.ins().f64const(ir::immediates::Ieee64::with_bits(0)),
-        _ => return Err(WasmError::Unsupported("unsupported local type")),
+        V128 => {
+            let constant_handle = builder.func.dfg.constants.insert([0; 16].to_vec().into());
+            builder.ins().vconst(ir::types::I8X16, constant_handle)
+        }
+        AnyRef => builder.ins().null(environ.reference_type()),
+        AnyFunc => builder.ins().null(environ.reference_type()),
+        ty => return Err(wasm_unsupported!("unsupported local type {:?}", ty)),
     };
 
     let ty = builder.func.dfg.value_type(zeroval);
@@ -197,9 +216,10 @@ pub fn declare_locals(
 /// This assumes that the local variable declarations have already been parsed and function
 /// arguments and locals are declared in the builder.
 fn parse_function_body<FE: FuncEnvironment + ?Sized>(
+    module_translation_state: &ModuleTranslationState,
     mut reader: BinaryReader,
     builder: &mut FunctionBuilder,
-    state: &mut TranslationState,
+    state: &mut FuncTranslationState,
     environ: &mut FE,
 ) -> WasmResult<()> {
     // The control stack is initialized with a single block representing the whole function.
@@ -209,7 +229,9 @@ fn parse_function_body<FE: FuncEnvironment + ?Sized>(
     while !state.control_stack.is_empty() {
         builder.set_srcloc(cur_srcloc(&reader));
         let op = reader.read_operator()?;
-        translate_operator(&op, builder, state, environ)?;
+        environ.before_translate_operator(&op, builder, state)?;
+        translate_operator(module_translation_state, &op, builder, state, environ)?;
+        environ.after_translate_operator(&op, builder, state)?;
     }
 
     // The final `End` operator left us in the exit block where we need to manually add a return
@@ -247,6 +269,7 @@ fn cur_srcloc(reader: &BinaryReader) -> ir::SourceLoc {
 mod tests {
     use super::{FuncTranslator, ReturnMode};
     use crate::environ::DummyEnvironment;
+    use crate::ModuleTranslationState;
     use cranelift_codegen::ir::types::I32;
     use cranelift_codegen::{ir, isa, settings, Context};
     use log::debug;
@@ -278,6 +301,7 @@ mod tests {
             false,
         );
 
+        let module_translation_state = ModuleTranslationState::new();
         let mut ctx = Context::new();
 
         ctx.func.name = ir::ExternalName::testcase("small1");
@@ -285,7 +309,13 @@ mod tests {
         ctx.func.signature.returns.push(ir::AbiParam::new(I32));
 
         trans
-            .translate(&BODY, 0, &mut ctx.func, &mut runtime.func_env())
+            .translate(
+                &module_translation_state,
+                &BODY,
+                0,
+                &mut ctx.func,
+                &mut runtime.func_env(),
+            )
             .unwrap();
         debug!("{}", ctx.func.display(None));
         ctx.verify(&flags).unwrap();
@@ -317,6 +347,8 @@ mod tests {
             ReturnMode::NormalReturns,
             false,
         );
+
+        let module_translation_state = ModuleTranslationState::new();
         let mut ctx = Context::new();
 
         ctx.func.name = ir::ExternalName::testcase("small2");
@@ -324,7 +356,13 @@ mod tests {
         ctx.func.signature.returns.push(ir::AbiParam::new(I32));
 
         trans
-            .translate(&BODY, 0, &mut ctx.func, &mut runtime.func_env())
+            .translate(
+                &module_translation_state,
+                &BODY,
+                0,
+                &mut ctx.func,
+                &mut runtime.func_env(),
+            )
             .unwrap();
         debug!("{}", ctx.func.display(None));
         ctx.verify(&flags).unwrap();
@@ -365,13 +403,21 @@ mod tests {
             ReturnMode::NormalReturns,
             false,
         );
+
+        let module_translation_state = ModuleTranslationState::new();
         let mut ctx = Context::new();
 
         ctx.func.name = ir::ExternalName::testcase("infloop");
         ctx.func.signature.returns.push(ir::AbiParam::new(I32));
 
         trans
-            .translate(&BODY, 0, &mut ctx.func, &mut runtime.func_env())
+            .translate(
+                &module_translation_state,
+                &BODY,
+                0,
+                &mut ctx.func,
+                &mut runtime.func_env(),
+            )
             .unwrap();
         debug!("{}", ctx.func.display(None));
         ctx.verify(&flags).unwrap();

@@ -1,13 +1,17 @@
 //! Defines `SimpleJITBackend`.
 
 use crate::memory::Memory;
-use cranelift_codegen::binemit::{Addend, CodeOffset, NullTrapSink, Reloc, RelocSink};
+use cranelift_codegen::binemit::{
+    Addend, CodeOffset, NullTrapSink, Reloc, RelocSink, Stackmap, StackmapSink,
+};
 use cranelift_codegen::isa::TargetIsa;
 use cranelift_codegen::{self, ir, settings};
 use cranelift_module::{
-    Backend, DataContext, DataDescription, Init, Linkage, ModuleNamespace, ModuleResult,
+    Backend, DataContext, DataDescription, DataId, FuncId, Init, Linkage, ModuleNamespace,
+    ModuleResult,
 };
 use cranelift_native;
+#[cfg(not(windows))]
 use libc;
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -114,9 +118,7 @@ pub struct SimpleJITBackend {
     isa: Box<dyn TargetIsa>,
     symbols: HashMap<String, *const u8>,
     libcall_names: Box<dyn Fn(ir::LibCall) -> String>,
-    code_memory: Memory,
-    readonly_memory: Memory,
-    writable_memory: Memory,
+    memory: SimpleJITMemoryHandle,
 }
 
 /// A record of a relocation to perform.
@@ -125,6 +127,13 @@ struct RelocRecord {
     reloc: Reloc,
     name: ir::ExternalName,
     addend: Addend,
+}
+
+struct StackmapRecord {
+    #[allow(dead_code)]
+    offset: CodeOffset,
+    #[allow(dead_code)]
+    stackmap: Stackmap,
 }
 
 pub struct SimpleJITCompiledFunction {
@@ -137,6 +146,13 @@ pub struct SimpleJITCompiledData {
     storage: *mut u8,
     size: usize,
     relocs: Vec<RelocRecord>,
+}
+
+/// A handle to allow freeing memory allocated by the `Backend`.
+pub struct SimpleJITMemoryHandle {
+    code: Memory,
+    readonly: Memory,
+    writable: Memory,
 }
 
 impl SimpleJITBackend {
@@ -188,23 +204,32 @@ impl<'simple_jit_backend> Backend for SimpleJITBackend {
     type CompiledData = SimpleJITCompiledData;
 
     /// SimpleJIT emits code and data into memory, and provides raw pointers
-    /// to them.
+    /// to them. They are valid for the remainder of the program's life, unless
+    /// [`free_memory`] is used.
+    ///
+    /// [`free_memory`]: #method.free_memory
     type FinalizedFunction = *const u8;
     type FinalizedData = (*mut u8, usize);
 
     /// SimpleJIT emits code and data into memory as it processes them, so it
     /// doesn't need to provide anything after the `Module` is complete.
-    type Product = ();
+    /// The handle object that is returned can optionally be used to free
+    /// allocated memory if required.
+    type Product = SimpleJITMemoryHandle;
 
     /// Create a new `SimpleJITBackend`.
     fn new(builder: SimpleJITBuilder) -> Self {
+        let memory = SimpleJITMemoryHandle {
+            code: Memory::new(),
+            readonly: Memory::new(),
+            writable: Memory::new(),
+        };
+
         Self {
             isa: builder.isa,
             symbols: builder.symbols,
             libcall_names: builder.libcall_names,
-            code_memory: Memory::new(),
-            readonly_memory: Memory::new(),
-            writable_memory: Memory::new(),
+            memory,
         }
     }
 
@@ -212,12 +237,13 @@ impl<'simple_jit_backend> Backend for SimpleJITBackend {
         &*self.isa
     }
 
-    fn declare_function(&mut self, _name: &str, _linkage: Linkage) {
+    fn declare_function(&mut self, _id: FuncId, _name: &str, _linkage: Linkage) {
         // Nothing to do.
     }
 
     fn declare_data(
         &mut self,
+        _id: DataId,
         _name: &str,
         _linkage: Linkage,
         _writable: bool,
@@ -228,6 +254,7 @@ impl<'simple_jit_backend> Backend for SimpleJITBackend {
 
     fn define_function(
         &mut self,
+        _id: FuncId,
         name: &str,
         ctx: &cranelift_codegen::Context,
         _namespace: &ModuleNamespace<Self>,
@@ -235,7 +262,8 @@ impl<'simple_jit_backend> Backend for SimpleJITBackend {
     ) -> ModuleResult<Self::CompiledFunction> {
         let size = code_size as usize;
         let ptr = self
-            .code_memory
+            .memory
+            .code
             .allocate(size, EXECUTABLE_DATA_ALIGNMENT)
             .expect("TODO: handle OOM etc.");
 
@@ -253,7 +281,16 @@ impl<'simple_jit_backend> Backend for SimpleJITBackend {
         // Ignore traps for now. For now, frontends should just avoid generating code
         // that traps.
         let mut trap_sink = NullTrapSink {};
-        unsafe { ctx.emit_to_memory(&*self.isa, ptr, &mut reloc_sink, &mut trap_sink) };
+        let mut stackmap_sink = SimpleJITStackmapSink::new();
+        unsafe {
+            ctx.emit_to_memory(
+                &*self.isa,
+                ptr,
+                &mut reloc_sink,
+                &mut trap_sink,
+                &mut stackmap_sink,
+            )
+        };
 
         Ok(Self::CompiledFunction {
             code: ptr,
@@ -264,6 +301,7 @@ impl<'simple_jit_backend> Backend for SimpleJITBackend {
 
     fn define_data(
         &mut self,
+        _id: DataId,
         _name: &str,
         writable: bool,
         align: Option<u8>,
@@ -280,11 +318,13 @@ impl<'simple_jit_backend> Backend for SimpleJITBackend {
 
         let size = init.size();
         let storage = if writable {
-            self.writable_memory
+            self.memory
+                .writable
                 .allocate(size, align.unwrap_or(WRITABLE_DATA_ALIGNMENT))
                 .expect("TODO: handle OOM etc.")
         } else {
-            self.readonly_memory
+            self.memory
+                .readonly
                 .allocate(size, align.unwrap_or(READONLY_DATA_ALIGNMENT))
                 .expect("TODO: handle OOM etc.")
         };
@@ -353,6 +393,7 @@ impl<'simple_jit_backend> Backend for SimpleJITBackend {
 
     fn finalize_function(
         &mut self,
+        _id: FuncId,
         func: &Self::CompiledFunction,
         namespace: &ModuleNamespace<Self>,
     ) -> Self::FinalizedFunction {
@@ -406,6 +447,7 @@ impl<'simple_jit_backend> Backend for SimpleJITBackend {
 
     fn finalize_data(
         &mut self,
+        _id: DataId,
         data: &Self::CompiledData,
         namespace: &ModuleNamespace<Self>,
     ) -> Self::FinalizedData {
@@ -454,13 +496,20 @@ impl<'simple_jit_backend> Backend for SimpleJITBackend {
 
     fn publish(&mut self) {
         // Now that we're done patching, prepare the memory for execution!
-        self.readonly_memory.set_readonly();
-        self.code_memory.set_readable_and_executable();
+        self.memory.readonly.set_readonly();
+        self.memory.code.set_readable_and_executable();
     }
 
-    /// SimpleJIT emits code and data into memory as it processes them, so it
-    /// doesn't need to provide anything after the `Module` is complete.
-    fn finish(self) {}
+    /// SimpleJIT emits code and data into memory as it processes them. This
+    /// method performs no additional processing, but returns a handle which
+    /// allows freeing the allocated memory. Otherwise said memory is leaked
+    /// to enable safe handling of the resulting pointers.
+    ///
+    /// This method does not need to be called when access to the memory
+    /// handle is not required.
+    fn finish(self) -> Self::Product {
+        self.memory
+    }
 }
 
 #[cfg(not(windows))]
@@ -506,6 +555,22 @@ fn lookup_with_dlsym(name: &str) -> *const u8 {
     }
 }
 
+impl SimpleJITMemoryHandle {
+    /// Free memory allocated for code and data segments of compiled functions.
+    ///
+    /// # Safety
+    ///
+    /// Because this function invalidates any pointers retrived from the
+    /// corresponding module, it should only be used when none of the functions
+    /// from that module are currently executing and none of the`fn` pointers
+    /// are called afterwards.
+    pub unsafe fn free_memory(&mut self) {
+        self.code.free_memory();
+        self.readonly.free_memory();
+        self.writable.free_memory();
+    }
+}
+
 struct SimpleJITRelocSink {
     pub relocs: Vec<RelocRecord>,
 }
@@ -546,5 +611,35 @@ impl RelocSink for SimpleJITRelocSink {
                 panic!("Unhandled reloc");
             }
         }
+    }
+
+    fn reloc_constant(&mut self, _offset: CodeOffset, reloc: Reloc, _constant: ir::ConstantOffset) {
+        match reloc {
+            Reloc::X86PCRelRodata4 => {
+                // Not necessary to record this unless we are going to split apart code and its
+                // jumptbl/rodata.
+            }
+            _ => {
+                panic!("Unhandled reloc");
+            }
+        }
+    }
+}
+
+struct SimpleJITStackmapSink {
+    pub stackmaps: Vec<StackmapRecord>,
+}
+
+impl SimpleJITStackmapSink {
+    pub fn new() -> Self {
+        Self {
+            stackmaps: Vec::new(),
+        }
+    }
+}
+
+impl StackmapSink for SimpleJITStackmapSink {
+    fn add_stackmap(&mut self, offset: CodeOffset, stackmap: Stackmap) {
+        self.stackmaps.push(StackmapRecord { offset, stackmap });
     }
 }

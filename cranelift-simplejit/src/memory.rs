@@ -1,5 +1,12 @@
+#[cfg(not(feature = "selinux-fix"))]
 use errno;
+
+#[cfg(not(any(feature = "selinux-fix", windows)))]
 use libc;
+
+#[cfg(feature = "selinux-fix")]
+use memmap::MmapMut;
+
 use region;
 use std::mem;
 use std::ptr;
@@ -11,6 +18,9 @@ fn round_up_to_page_size(size: usize, page_size: usize) -> usize {
 
 /// A simple struct consisting of a pointer and length.
 struct PtrLen {
+    #[cfg(feature = "selinux-fix")]
+    map: Option<MmapMut>,
+
     ptr: *mut u8,
     len: usize,
 }
@@ -19,6 +29,9 @@ impl PtrLen {
     /// Create a new empty `PtrLen`.
     fn new() -> Self {
         Self {
+            #[cfg(feature = "selinux-fix")]
+            map: None,
+
             ptr: ptr::null_mut(),
             len: 0,
         }
@@ -26,13 +39,34 @@ impl PtrLen {
 
     /// Create a new `PtrLen` pointing to at least `size` bytes of memory,
     /// suitably sized and aligned for memory protection.
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(all(not(target_os = "windows"), feature = "selinux-fix"))]
     fn with_size(size: usize) -> Result<Self, String> {
         let page_size = region::page::size();
         let alloc_size = round_up_to_page_size(size, page_size);
+        let map = MmapMut::map_anon(alloc_size);
+
+        match map {
+            Ok(mut map) => {
+                // The order here is important; we assign the pointer first to get
+                // around compile time borrow errors.
+                Ok(Self {
+                    ptr: map.as_mut_ptr(),
+                    map: Some(map),
+                    len: alloc_size,
+                })
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    #[cfg(all(not(target_os = "windows"), not(feature = "selinux-fix")))]
+    fn with_size(size: usize) -> Result<Self, String> {
+        let mut ptr = ptr::null_mut();
+        let page_size = region::page::size();
+        let alloc_size = round_up_to_page_size(size, page_size);
         unsafe {
-            let mut ptr: *mut libc::c_void = mem::uninitialized();
             let err = libc::posix_memalign(&mut ptr, page_size, alloc_size);
+
             if err == 0 {
                 Ok(Self {
                     ptr: ptr as *mut u8,
@@ -71,8 +105,26 @@ impl PtrLen {
     }
 }
 
+// `MMapMut` from `cfg(feature = "selinux-fix")` already deallocates properly.
+#[cfg(all(not(target_os = "windows"), not(feature = "selinux-fix")))]
+impl Drop for PtrLen {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            unsafe {
+                region::protect(self.ptr, self.len, region::Protection::ReadWrite)
+                    .expect("unable to unprotect memory");
+                libc::free(self.ptr as _);
+            }
+        }
+    }
+}
+
+// TODO: add a `Drop` impl for `cfg(target_os = "windows")`
+
 /// JIT memory manager. This manages pages of suitably aligned and
-/// accessible memory.
+/// accessible memory. Memory will be leaked by default to have
+/// function pointers remain valid for the remainder of the
+/// program's life.
 pub struct Memory {
     allocations: Vec<PtrLen>,
     executable: usize,
@@ -122,11 +174,26 @@ impl Memory {
     pub fn set_readable_and_executable(&mut self) {
         self.finish_current();
 
-        for &PtrLen { ptr, len } in &self.allocations[self.executable..] {
-            if len != 0 {
-                unsafe {
-                    region::protect(ptr, len, region::Protection::ReadExecute)
-                        .expect("unable to make memory readable+executable");
+        #[cfg(feature = "selinux-fix")]
+        {
+            for &PtrLen { ref map, ptr, len } in &self.allocations[self.executable..] {
+                if len != 0 && map.is_some() {
+                    unsafe {
+                        region::protect(ptr, len, region::Protection::ReadExecute)
+                            .expect("unable to make memory readable+executable");
+                    }
+                }
+            }
+        }
+
+        #[cfg(not(feature = "selinux-fix"))]
+        {
+            for &PtrLen { ptr, len } in &self.allocations[self.executable..] {
+                if len != 0 {
+                    unsafe {
+                        region::protect(ptr, len, region::Protection::ReadExecute)
+                            .expect("unable to make memory readable+executable");
+                    }
                 }
             }
         }
@@ -136,18 +203,46 @@ impl Memory {
     pub fn set_readonly(&mut self) {
         self.finish_current();
 
-        for &PtrLen { ptr, len } in &self.allocations[self.executable..] {
-            if len != 0 {
-                unsafe {
-                    region::protect(ptr, len, region::Protection::Read)
-                        .expect("unable to make memory readonly");
+        #[cfg(feature = "selinux-fix")]
+        {
+            for &PtrLen { ref map, ptr, len } in &self.allocations[self.executable..] {
+                if len != 0 && map.is_some() {
+                    unsafe {
+                        region::protect(ptr, len, region::Protection::Read)
+                            .expect("unable to make memory readonly");
+                    }
+                }
+            }
+        }
+
+        #[cfg(not(feature = "selinux-fix"))]
+        {
+            for &PtrLen { ptr, len } in &self.allocations[self.executable..] {
+                if len != 0 {
+                    unsafe {
+                        region::protect(ptr, len, region::Protection::Read)
+                            .expect("unable to make memory readonly");
+                    }
                 }
             }
         }
     }
+
+    /// Frees all allocated memory regions that would be leaked otherwise.
+    /// Likely to invalidate existing function pointers, causing unsafety.
+    pub unsafe fn free_memory(&mut self) {
+        self.allocations.clear();
+    }
 }
 
-// TODO: Implement Drop to unprotect and deallocate the memory?
+impl Drop for Memory {
+    fn drop(&mut self) {
+        // leak memory to guarantee validity of function pointers
+        mem::replace(&mut self.allocations, Vec::new())
+            .into_iter()
+            .for_each(mem::forget);
+    }
+}
 
 #[cfg(test)]
 mod tests {

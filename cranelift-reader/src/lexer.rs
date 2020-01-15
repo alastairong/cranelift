@@ -27,6 +27,7 @@ pub enum Token<'a> {
     Dot,                  // '.'
     Colon,                // ':'
     Equal,                // '='
+    Not,                  // '!'
     Arrow,                // '->'
     Float(&'a str),       // Floating point immediate
     Integer(&'a str),     // Integer immediate
@@ -42,6 +43,7 @@ pub enum Token<'a> {
     SigRef(u32),          // sig2
     UserRef(u32),         // u345
     Name(&'a str),        // %9arbitrary_alphanum, %x3, %0, %function ...
+    String(&'a str),      // "abritrary quoted string with no escape" ...
     HexSequence(&'a str), // #89AF
     Identifier(&'a str),  // Unrecognized identifier (opcode, enumerator, ...)
     SourceLoc(&'a str),   // @00c7
@@ -363,6 +365,7 @@ impl<'a> Lexer<'a> {
             "i16" => types::I16,
             "i32" => types::I32,
             "i64" => types::I64,
+            "i128" => types::I128,
             "f32" => types::F32,
             "f64" => types::F64,
             "b1" => types::B1,
@@ -370,6 +373,9 @@ impl<'a> Lexer<'a> {
             "b16" => types::B16,
             "b32" => types::B32,
             "b64" => types::B64,
+            "b128" => types::B128,
+            "r32" => types::R32,
+            "r64" => types::R64,
             _ => return None,
         };
         if is_vector {
@@ -397,6 +403,27 @@ impl<'a> Lexer<'a> {
 
         let end = self.pos;
         token(Token::Name(&self.source[begin..end]), loc)
+    }
+
+    /// Scan for a multi-line quoted string with no escape character.
+    fn scan_string(&mut self) -> Result<LocatedToken<'a>, LocatedError> {
+        let loc = self.loc();
+        let begin = self.pos + 1;
+
+        assert_eq!(self.lookahead, Some('"'));
+
+        while let Some(c) = self.next_ch() {
+            if c == '"' {
+                break;
+            }
+        }
+
+        let end = self.pos;
+        if self.lookahead != Some('"') {
+            return error(LexError::InvalidChar, self.loc());
+        }
+        self.next_ch();
+        token(Token::String(&self.source[begin..end]), loc)
     }
 
     fn scan_hex_sequence(&mut self) -> Result<LocatedToken<'a>, LocatedError> {
@@ -434,6 +461,7 @@ impl<'a> Lexer<'a> {
     /// Get the next token or a lexical error.
     ///
     /// Return None when the end of the source is encountered.
+    #[allow(clippy::cognitive_complexity)]
     pub fn next(&mut self) -> Option<Result<LocatedToken<'a>, LocatedError>> {
         loop {
             let loc = self.loc();
@@ -450,6 +478,7 @@ impl<'a> Lexer<'a> {
                 Some('.') => Some(self.scan_char(Token::Dot)),
                 Some(':') => Some(self.scan_char(Token::Colon)),
                 Some('=') => Some(self.scan_char(Token::Equal)),
+                Some('!') => Some(self.scan_char(Token::Not)),
                 Some('+') => Some(self.scan_number()),
                 Some('-') => {
                     if self.looking_at("->") {
@@ -459,8 +488,15 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 Some(ch) if ch.is_digit(10) => Some(self.scan_number()),
-                Some(ch) if ch.is_alphabetic() => Some(self.scan_word()),
+                Some(ch) if ch.is_alphabetic() => {
+                    if self.looking_at("NaN") || self.looking_at("Inf") {
+                        Some(self.scan_number())
+                    } else {
+                        Some(self.scan_word())
+                    }
+                }
                 Some('%') => Some(self.scan_name()),
+                Some('"') => Some(self.scan_string()),
                 Some('#') => Some(self.scan_hex_sequence()),
                 Some('@') => Some(self.scan_srcloc()),
                 Some(ch) if ch.is_whitespace() => {
@@ -563,7 +599,7 @@ mod tests {
 
     #[test]
     fn lex_numbers() {
-        let mut lex = Lexer::new(" 0 2_000 -1,0xf -0x0 0.0 0x0.4p-34 +5");
+        let mut lex = Lexer::new(" 0 2_000 -1,0xf -0x0 0.0 0x0.4p-34 NaN +5");
         assert_eq!(lex.next(), token(Token::Integer("0"), 1));
         assert_eq!(lex.next(), token(Token::Integer("2_000"), 1));
         assert_eq!(lex.next(), token(Token::Integer("-1"), 1));
@@ -572,6 +608,7 @@ mod tests {
         assert_eq!(lex.next(), token(Token::Integer("-0x0"), 1));
         assert_eq!(lex.next(), token(Token::Float("0.0"), 1));
         assert_eq!(lex.next(), token(Token::Float("0x0.4p-34"), 1));
+        assert_eq!(lex.next(), token(Token::Float("NaN"), 1));
         assert_eq!(lex.next(), token(Token::Integer("+5"), 1));
         assert_eq!(lex.next(), None);
     }
@@ -629,6 +666,33 @@ mod tests {
         assert_eq!(lex.next(), token(Token::Name("v3"), 1));
         assert_eq!(lex.next(), token(Token::Name("ebb11"), 1));
         assert_eq!(lex.next(), token(Token::Name("_"), 1));
+    }
+
+    #[test]
+    fn lex_strings() {
+        let mut lex = Lexer::new(
+            r#"""  "0" "x3""function" "123 abc" "\" "start
+                    and end on
+                    different lines" "#,
+        );
+
+        assert_eq!(lex.next(), token(Token::String(""), 1));
+        assert_eq!(lex.next(), token(Token::String("0"), 1));
+        assert_eq!(lex.next(), token(Token::String("x3"), 1));
+        assert_eq!(lex.next(), token(Token::String("function"), 1));
+        assert_eq!(lex.next(), token(Token::String("123 abc"), 1));
+        assert_eq!(lex.next(), token(Token::String(r#"\"#), 1));
+        assert_eq!(
+            lex.next(),
+            token(
+                Token::String(
+                    r#"start
+                    and end on
+                    different lines"#
+                ),
+                1
+            )
+        );
     }
 
     #[test]

@@ -6,12 +6,15 @@
 use crate::entity::{Iter, IterMut, Keys, PrimaryMap};
 use crate::ir::{StackSlot, Type};
 use crate::packed_option::PackedOption;
+use alloc::vec::Vec;
 use core::cmp;
 use core::fmt;
 use core::ops::{Index, IndexMut};
 use core::slice;
 use core::str::FromStr;
-use std::vec::Vec;
+
+#[cfg(feature = "enable-serde")]
+use serde::{Deserialize, Serialize};
 
 /// The size of an object on the stack, or the size of a stack frame.
 ///
@@ -38,6 +41,7 @@ fn spill_size(ty: Type) -> StackSize {
 
 /// The kind of a stack slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub enum StackSlotKind {
     /// A spill slot. This is a stack slot created by the register allocator.
     SpillSlot,
@@ -60,6 +64,15 @@ pub enum StackSlotKind {
     /// stack slots are only valid while setting up a call.
     OutgoingArg,
 
+    /// Space allocated in the caller's frame for the callee's return values
+    /// that are passed out via return pointer.
+    ///
+    /// If there are more return values than registers available for the callee's calling
+    /// convention, or the return value is larger than the available registers' space, then we
+    /// allocate stack space in this frame and pass a pointer to the callee, which then writes its
+    /// return values into this space.
+    StructReturnSlot,
+
     /// An emergency spill slot.
     ///
     /// Emergency slots are allocated late when the register's constraint solver needs extra space
@@ -77,6 +90,7 @@ impl FromStr for StackSlotKind {
             "spill_slot" => Ok(SpillSlot),
             "incoming_arg" => Ok(IncomingArg),
             "outgoing_arg" => Ok(OutgoingArg),
+            "sret_slot" => Ok(StructReturnSlot),
             "emergency_slot" => Ok(EmergencySlot),
             _ => Err(()),
         }
@@ -91,13 +105,15 @@ impl fmt::Display for StackSlotKind {
             SpillSlot => "spill_slot",
             IncomingArg => "incoming_arg",
             OutgoingArg => "outgoing_arg",
+            StructReturnSlot => "sret_slot",
             EmergencySlot => "emergency_slot",
         })
     }
 }
 
 /// Contents of a stack slot.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct StackSlotData {
     /// The kind of stack slot.
     pub kind: StackSlotKind,
@@ -149,7 +165,8 @@ impl fmt::Display for StackSlotData {
 /// Stack frame manager.
 ///
 /// Keep track of all the stack slots used by a function.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct StackSlots {
     /// All allocated stack slots.
     slots: PrimaryMap<StackSlot, StackSlotData>,
@@ -201,11 +218,6 @@ impl StackSlots {
     /// Check if `ss` is a valid stack slot reference.
     pub fn is_valid(&self, ss: StackSlot) -> bool {
         self.slots.is_valid(ss)
-    }
-
-    /// Set the offset of a stack slot.
-    pub fn set_offset(&mut self, ss: StackSlot, offset: StackOffset) {
-        self.slots[ss].offset = Some(offset);
     }
 
     /// Get an iterator over all the stack slot keys.
@@ -342,7 +354,7 @@ mod tests {
     use super::*;
     use crate::ir::types;
     use crate::ir::Function;
-    use std::string::ToString;
+    use alloc::string::ToString;
 
     #[test]
     fn stack_slot() {

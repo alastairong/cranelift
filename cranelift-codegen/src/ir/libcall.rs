@@ -7,6 +7,8 @@ use crate::ir::{
 use crate::isa::{CallConv, RegUnit, TargetIsa};
 use core::fmt;
 use core::str::FromStr;
+#[cfg(feature = "enable-serde")]
+use serde::{Deserialize, Serialize};
 
 /// The name of a runtime library routine.
 ///
@@ -16,7 +18,8 @@ use core::str::FromStr;
 /// convention in the embedding VM's runtime library.
 ///
 /// This list is likely to grow over time.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub enum LibCall {
     /// probe for stack overflow. These are emitted for functions which need
     /// when the `probestack_enabled` setting is true.
@@ -56,18 +59,18 @@ impl FromStr for LibCall {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "Probestack" => Ok(LibCall::Probestack),
-            "CeilF32" => Ok(LibCall::CeilF32),
-            "CeilF64" => Ok(LibCall::CeilF64),
-            "FloorF32" => Ok(LibCall::FloorF32),
-            "FloorF64" => Ok(LibCall::FloorF64),
-            "TruncF32" => Ok(LibCall::TruncF32),
-            "TruncF64" => Ok(LibCall::TruncF64),
-            "NearestF32" => Ok(LibCall::NearestF32),
-            "NearestF64" => Ok(LibCall::NearestF64),
-            "Memcpy" => Ok(LibCall::Memcpy),
-            "Memset" => Ok(LibCall::Memset),
-            "Memmove" => Ok(LibCall::Memmove),
+            "Probestack" => Ok(Self::Probestack),
+            "CeilF32" => Ok(Self::CeilF32),
+            "CeilF64" => Ok(Self::CeilF64),
+            "FloorF32" => Ok(Self::FloorF32),
+            "FloorF64" => Ok(Self::FloorF64),
+            "TruncF32" => Ok(Self::TruncF32),
+            "TruncF64" => Ok(Self::TruncF64),
+            "NearestF32" => Ok(Self::NearestF32),
+            "NearestF64" => Ok(Self::NearestF64),
+            "Memcpy" => Ok(Self::Memcpy),
+            "Memset" => Ok(Self::Memset),
+            "Memmove" => Ok(Self::Memmove),
             _ => Err(()),
         }
     }
@@ -81,17 +84,17 @@ impl LibCall {
     pub fn for_inst(opcode: Opcode, ctrl_type: Type) -> Option<Self> {
         Some(match ctrl_type {
             types::F32 => match opcode {
-                Opcode::Ceil => LibCall::CeilF32,
-                Opcode::Floor => LibCall::FloorF32,
-                Opcode::Trunc => LibCall::TruncF32,
-                Opcode::Nearest => LibCall::NearestF32,
+                Opcode::Ceil => Self::CeilF32,
+                Opcode::Floor => Self::FloorF32,
+                Opcode::Trunc => Self::TruncF32,
+                Opcode::Nearest => Self::NearestF32,
                 _ => return None,
             },
             types::F64 => match opcode {
-                Opcode::Ceil => LibCall::CeilF64,
-                Opcode::Floor => LibCall::FloorF64,
-                Opcode::Trunc => LibCall::TruncF64,
-                Opcode::Nearest => LibCall::NearestF64,
+                Opcode::Ceil => Self::CeilF64,
+                Opcode::Floor => Self::FloorF64,
+                Opcode::Trunc => Self::TruncF64,
+                Opcode::Nearest => Self::NearestF64,
                 _ => return None,
             },
             _ => return None,
@@ -105,11 +108,13 @@ impl LibCall {
 /// If there is an existing reference, use it, otherwise make a new one.
 pub fn get_libcall_funcref(
     libcall: LibCall,
+    call_conv: CallConv,
     func: &mut Function,
     inst: Inst,
     isa: &dyn TargetIsa,
 ) -> FuncRef {
-    find_funcref(libcall, func).unwrap_or_else(|| make_funcref_for_inst(libcall, func, inst, isa))
+    find_funcref(libcall, func)
+        .unwrap_or_else(|| make_funcref_for_inst(libcall, call_conv, func, inst, isa))
 }
 
 /// Get a function reference for the probestack function in `func`.
@@ -161,16 +166,25 @@ fn make_funcref_for_probestack(
 /// Create a funcref for `libcall` with a signature matching `inst`.
 fn make_funcref_for_inst(
     libcall: LibCall,
+    call_conv: CallConv,
     func: &mut Function,
     inst: Inst,
     isa: &dyn TargetIsa,
 ) -> FuncRef {
-    let mut sig = Signature::new(isa.default_call_conv());
+    let mut sig = Signature::new(call_conv);
     for &v in func.dfg.inst_args(inst) {
         sig.params.push(AbiParam::new(func.dfg.value_type(v)));
     }
     for &v in func.dfg.inst_results(inst) {
         sig.returns.push(AbiParam::new(func.dfg.value_type(v)));
+    }
+
+    if call_conv.extends_baldrdash() {
+        // Adds the special VMContext parameter to the signature.
+        sig.params.push(AbiParam::special(
+            isa.pointer_type(),
+            ArgumentPurpose::VMContext,
+        ));
     }
 
     make_funcref(libcall, func, sig, isa)
@@ -195,7 +209,7 @@ fn make_funcref(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::string::ToString;
+    use alloc::string::ToString;
 
     #[test]
     fn display() {
