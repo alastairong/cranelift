@@ -37,7 +37,7 @@ use cranelift_codegen::ir::{
     self, ConstantData, InstBuilder, JumpTableData, MemFlags, Value, ValueLabel,
 };
 use cranelift_codegen::packed_option::ReservedValue;
-use cranelift_frontend::{FunctionBuilder, Variable};
+use wasmer_clif_fork_frontend::{FunctionBuilder, Variable};
 use wasmparser::{MemoryImmediate, Operator};
 
 // Clippy warns about "flags: _" but its important to document that the flags field is ignored

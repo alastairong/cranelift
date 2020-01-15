@@ -13,12 +13,12 @@ edition = "2018"
 
 [dependencies]
 cranelift-codegen = { path = "../cranelift-codegen", version = "0.52.0", default-features = false }
-cranelift-frontend = { path = "../cranelift-frontend", version = "0.52.0", default-features = false }
+wasmer-clif-fork-frontend = { path = "../cranelift-frontend", version = "0.52.0", default-features = false }
 
 [features]
 default = ["std"]
-std = ["cranelift-codegen/std", "cranelift-frontend/std"]
-core = ["cranelift-codegen/core", "cranelift-frontend/core"]
+std = ["cranelift-codegen/std", "wasmer-clif-fork-frontend/std"]
+core = ["cranelift-codegen/core", "wasmer-clif-fork-frontend/core"]
 
 [badges]
 maintenance = { status = "experimental" }

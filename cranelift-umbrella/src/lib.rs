@@ -26,7 +26,7 @@
 
 /// Provide these crates, renamed to reduce stutter.
 pub use cranelift_codegen as codegen;
-pub use cranelift_frontend as frontend;
+pub use wasmer_clif_fork_frontend as frontend;
 
 /// A prelude providing convenient access to commonly-used cranelift features. Use
 /// as `use cranelift::prelude::*`.

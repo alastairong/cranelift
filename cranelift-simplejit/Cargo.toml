@@ -1,9 +1,9 @@
 [package]
-name = "cranelift-simplejit"
+name = "wasmer-clif-fork-simplejit"
 version = "0.52.0"
-authors = ["The Cranelift Project Developers"]
+authors = ["Forked from work done by The Cranelift Project Developers"]
 description = "A simple JIT library backed by Cranelift"
-repository = "https://github.com/bytecodealliance/cranelift"
+repository = "https://github.com/wasmerio/cranelift/tree/wasmer"
 documentation = "https://cranelift.readthedocs.io/"
 license = "Apache-2.0 WITH LLVM-exception"
 readme = "README.md"
@@ -33,7 +33,7 @@ default = []
 
 [dev-dependencies]
 cranelift = { path = "../cranelift-umbrella", version = "0.52.0" }
-cranelift-frontend = { path = "../cranelift-frontend", version = "0.52.0" }
+wasmer-clif-fork-frontend = { path = "../cranelift-frontend", version = "0.52.0" }
 cranelift-entity = { path = "../cranelift-entity", version = "0.52.0" }
 
 [badges]

@@ -1,4 +1,4 @@
-//! CLI tool to use the functions provided by the [cranelift-wasm](../cranelift_wasm/index.html)
+//! CLI tool to use the functions provided by the [wasmer-clif-fork-wasm](../wasmer_clif_fork_wasm/index.html)
 //! crate.
 //!
 //! Reads Wasm binary/text files, translates the functions' code to Cranelift IR.
@@ -15,7 +15,7 @@ use cranelift_codegen::settings::FlagsOrIsa;
 use cranelift_codegen::timing;
 use cranelift_codegen::Context;
 use cranelift_entity::EntityRef;
-use cranelift_wasm::{translate_module, DummyEnvironment, FuncIndex, ReturnMode};
+use wasmer_clif_fork_wasm::{translate_module, DummyEnvironment, FuncIndex, ReturnMode};
 use std::path::Path;
 use std::path::PathBuf;
 use term;

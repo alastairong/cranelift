@@ -1,12 +1,12 @@
 [package]
-authors = ["The Cranelift Project Developers"]
-name = "cranelift-frontend"
+authors = ["Forked from work done by The Cranelift Project Developers"]
+name = "wasmer-clif-fork-frontend"
 version = "0.52.0"
 description = "Cranelift IR builder helper"
 license = "Apache-2.0 WITH LLVM-exception"
 documentation = "https://cranelift.readthedocs.io/"
 categories = ["no-std"]
-repository = "https://github.com/bytecodealliance/cranelift"
+repository = "https://github.com/wasmerio/cranelift/tree/wasmer"
 readme = "README.md"
 edition = "2018"
 

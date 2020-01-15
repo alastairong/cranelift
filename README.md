@@ -1,6 +1,8 @@
 Cranelift Code Generator
 ========================
 
+**This is a (hopefully short-lived) fork** of [Cranelift](https://github.com/CraneStation/cranelift) so that we can continue publishing Wasmer runtime related crates on crates.io. If you're reading this and want to use Cranelift, you almost certainly want to use [the version this is forked from](https://github.com/CraneStation/cranelift). If you're associated with Cranelift and would like to merge any changes we have, please reach out to us at engineering@wasmer.io. We hope to submit pull requests too.
+
 **A [Bytecode Alliance][BA] project**
 
 Cranelift is a low-level retargetable code generator. It translates a
