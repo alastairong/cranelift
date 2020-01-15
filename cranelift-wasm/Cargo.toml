@@ -2,6 +2,7 @@
 name = "wasmer-clif-fork-wasm"
 version = "0.52.0"
 authors = ["Forked from work done by The Cranelift Project Developers"]
+license = "Apache-2.0 WITH LLVM-exception"
 description = "Translator from WebAssembly to Cranelift IR"
 repository = "https://github.com/wasmerio/cranelift/tree/wasmer"
 edition = "2018"
