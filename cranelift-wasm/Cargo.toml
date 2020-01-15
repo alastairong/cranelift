@@ -26,7 +26,7 @@ core = ["hashbrown", "cranelift-codegen/core", "wasmer-clif-fork-frontend/core"]
 enable-serde = ["serde"]
 
 # Temporary feature that enforces basic block semantics.
-basic-blocks = ["cranelift-codegen/basic-blocks", "cranelift-frontend/basic-blocks"]
+basic-blocks = ["cranelift-codegen/basic-blocks", "wasmer-clif-fork-frontend/basic-blocks"]
 
 [badges]
 maintenance = { status = "experimental" }

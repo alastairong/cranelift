@@ -49,8 +49,8 @@ walkdir = "2.2"
 default = ["disas", "wasm", "cranelift-codegen/all-arch", "basic-blocks"]
 disas = ["capstone"]
 wasm = ["wabt", "wasmer-clif-fork-wasm"]
-basic-blocks = ["cranelift-codegen/basic-blocks", "cranelift-frontend/basic-blocks",
-"cranelift-wasm/basic-blocks", "cranelift-filetests/basic-blocks"]
+basic-blocks = ["cranelift-codegen/basic-blocks", "wasmer-clif-fork-frontend/basic-blocks",
+"wasmer-clif-fork-wasm/basic-blocks", "cranelift-filetests/basic-blocks"]
 
 # We want debug symbols on release binaries by default since it allows profiling
 # tools to give more accurate information. We can always strip them out later if
