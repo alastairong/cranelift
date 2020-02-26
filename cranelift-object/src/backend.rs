@@ -1,6 +1,6 @@
 //! Defines `ObjectBackend`.
 
-use crate::traps::{ObjectTrapSink, ObjectTrapSite};
+use crate::traps::ObjectTrapSink;
 use cranelift_codegen::binemit::{
     Addend, CodeOffset, NullStackmapSink, NullTrapSink, Reloc, RelocSink,
 };
@@ -9,12 +9,15 @@ use cranelift_codegen::isa::TargetIsa;
 use cranelift_codegen::{self, binemit, ir};
 use cranelift_module::{
     Backend, DataContext, DataDescription, DataId, FuncId, Init, Linkage, ModuleNamespace,
-    ModuleResult,
+    ModuleResult, TrapSite,
 };
-use object::write::{Object, Relocation, SectionId, StandardSection, Symbol, SymbolId};
-use object::{RelocationEncoding, RelocationKind, SymbolKind, SymbolScope};
+use object::write::{
+    Object, Relocation, SectionId, StandardSection, Symbol, SymbolId, SymbolSection,
+};
+use object::{RelocationEncoding, RelocationKind, SymbolFlags, SymbolKind, SymbolScope};
 use std::collections::HashMap;
-use target_lexicon::PointerWidth;
+use std::mem;
+use target_lexicon::{BinaryFormat, PointerWidth};
 
 #[derive(Debug)]
 /// Setting to enable collection of traps. Setting this to `Enabled` in
@@ -51,14 +54,14 @@ impl ObjectBuilder {
         name: String,
         collect_traps: ObjectTrapCollection,
         libcall_names: Box<dyn Fn(ir::LibCall) -> String>,
-    ) -> ModuleResult<Self> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             isa,
             name,
             collect_traps,
             libcall_names,
             function_alignment: 1,
-        })
+        }
     }
 
     /// Set the alignment used for functions.
@@ -76,7 +79,8 @@ pub struct ObjectBackend {
     object: Object,
     functions: SecondaryMap<FuncId, Option<SymbolId>>,
     data_objects: SecondaryMap<DataId, Option<SymbolId>>,
-    traps: SecondaryMap<FuncId, Vec<ObjectTrapSite>>,
+    traps: SecondaryMap<FuncId, Vec<TrapSite>>,
+    relocs: Vec<SymbolRelocs>,
     libcalls: HashMap<ir::LibCall, SymbolId>,
     libcall_names: Box<dyn Fn(ir::LibCall) -> String>,
     collect_traps: ObjectTrapCollection,
@@ -107,6 +111,7 @@ impl Backend for ObjectBackend {
             functions: SecondaryMap::new(),
             data_objects: SecondaryMap::new(),
             traps: SecondaryMap::new(),
+            relocs: Vec::new(),
             libcalls: HashMap::new(),
             libcall_names: builder.libcall_names,
             collect_traps: builder.collect_traps,
@@ -133,7 +138,8 @@ impl Backend for ObjectBackend {
                 kind: SymbolKind::Text,
                 scope,
                 weak,
-                section: None,
+                section: SymbolSection::Undefined,
+                flags: SymbolFlags::None,
             });
             self.functions[id] = Some(symbol_id);
         }
@@ -145,12 +151,19 @@ impl Backend for ObjectBackend {
         name: &str,
         linkage: Linkage,
         _writable: bool,
+        tls: bool,
         _align: Option<u8>,
     ) {
+        let kind = if tls {
+            SymbolKind::Tls
+        } else {
+            SymbolKind::Data
+        };
         let (scope, weak) = translate_linkage(linkage);
 
         if let Some(data) = self.data_objects[id] {
             let symbol = self.object.symbol_mut(data);
+            symbol.kind = kind;
             symbol.scope = scope;
             symbol.weak = weak;
         } else {
@@ -158,10 +171,11 @@ impl Backend for ObjectBackend {
                 name: name.as_bytes().to_vec(),
                 value: 0,
                 size: 0,
-                kind: SymbolKind::Data,
+                kind,
                 scope,
                 weak,
-                section: None,
+                section: SymbolSection::Undefined,
+                flags: SymbolFlags::None,
             });
             self.data_objects[id] = Some(symbol_id);
         }
@@ -176,7 +190,7 @@ impl Backend for ObjectBackend {
         code_size: u32,
     ) -> ModuleResult<ObjectCompiledFunction> {
         let mut code: Vec<u8> = vec![0; code_size as usize];
-        let mut reloc_sink = ObjectRelocSink::default();
+        let mut reloc_sink = ObjectRelocSink::new(self.object.format());
         let mut trap_sink = ObjectTrapSink::default();
         let mut stackmap_sink = NullStackmapSink {};
 
@@ -208,13 +222,32 @@ impl Backend for ObjectBackend {
         let offset = self
             .object
             .add_symbol_data(symbol, section, &code, self.function_alignment);
+        if !reloc_sink.relocs.is_empty() {
+            self.relocs.push(SymbolRelocs {
+                section,
+                offset,
+                relocs: reloc_sink.relocs,
+            });
+        }
         self.traps[func_id] = trap_sink.sites;
-        Ok(ObjectCompiledFunction {
-            offset,
-            size: code_size,
-            section,
-            relocs: reloc_sink.relocs,
-        })
+        Ok(ObjectCompiledFunction)
+    }
+
+    fn define_function_bytes(
+        &mut self,
+        func_id: FuncId,
+        _name: &str,
+        bytes: &[u8],
+        _namespace: &ModuleNamespace<Self>,
+        traps: Vec<TrapSite>,
+    ) -> ModuleResult<ObjectCompiledFunction> {
+        let symbol = self.functions[func_id].unwrap();
+        let section = self.object.section_id(StandardSection::Text);
+        let _offset = self
+            .object
+            .add_symbol_data(symbol, section, bytes, self.function_alignment);
+        self.traps[func_id] = traps;
+        Ok(ObjectCompiledFunction)
     }
 
     fn define_data(
@@ -222,6 +255,7 @@ impl Backend for ObjectBackend {
         data_id: DataId,
         _name: &str,
         writable: bool,
+        tls: bool,
         align: Option<u8>,
         data_ctx: &DataContext,
         _namespace: &ModuleNamespace<Self>,
@@ -233,20 +267,6 @@ impl Backend for ObjectBackend {
             ref function_relocs,
             ref data_relocs,
         } = data_ctx.description();
-
-        let size = init.size();
-        let mut data = Vec::with_capacity(size);
-        match *init {
-            Init::Uninitialized => {
-                panic!("data is not initialized yet");
-            }
-            Init::Zeros { .. } => {
-                data.resize(size, 0);
-            }
-            Init::Bytes { ref contents } => {
-                data.extend_from_slice(contents);
-            }
-        }
 
         let reloc_size = match self.isa.triple().pointer_width().unwrap() {
             PointerWidth::U16 => 16,
@@ -276,21 +296,43 @@ impl Backend for ObjectBackend {
         }
 
         let symbol = self.data_objects[data_id].unwrap();
-        let section = self.object.section_id(if writable {
+        let section_kind = if let Init::Zeros { .. } = *init {
+            if tls {
+                StandardSection::UninitializedTls
+            } else {
+                StandardSection::UninitializedData
+            }
+        } else if tls {
+            StandardSection::Tls
+        } else if writable {
             StandardSection::Data
         } else if relocs.is_empty() {
             StandardSection::ReadOnlyData
         } else {
             StandardSection::ReadOnlyDataWithRel
-        });
-        let offset =
-            self.object
-                .add_symbol_data(symbol, section, &data, u64::from(align.unwrap_or(1)));
-        Ok(ObjectCompiledData {
-            offset,
-            section,
-            relocs,
-        })
+        };
+        let section = self.object.section_id(section_kind);
+
+        let align = u64::from(align.unwrap_or(1));
+        let offset = match *init {
+            Init::Uninitialized => {
+                panic!("data is not initialized yet");
+            }
+            Init::Zeros { size } => self
+                .object
+                .add_symbol_bss(symbol, section, size as u64, align),
+            Init::Bytes { ref contents } => self
+                .object
+                .add_symbol_data(symbol, section, &contents, align),
+        };
+        if !relocs.is_empty() {
+            self.relocs.push(SymbolRelocs {
+                section,
+                offset,
+                relocs,
+            });
+        }
+        Ok(ObjectCompiledData)
     }
 
     fn write_data_funcaddr(
@@ -315,34 +357,10 @@ impl Backend for ObjectBackend {
     fn finalize_function(
         &mut self,
         _id: FuncId,
-        func: &ObjectCompiledFunction,
-        namespace: &ModuleNamespace<Self>,
+        _func: &ObjectCompiledFunction,
+        _namespace: &ModuleNamespace<Self>,
     ) {
-        for &RelocRecord {
-            offset,
-            ref name,
-            kind,
-            encoding,
-            size,
-            addend,
-        } in &func.relocs
-        {
-            let offset = func.offset + u64::from(offset);
-            let symbol = self.get_symbol(namespace, name);
-            self.object
-                .add_relocation(
-                    func.section,
-                    Relocation {
-                        offset,
-                        size,
-                        kind,
-                        encoding,
-                        symbol,
-                        addend,
-                    },
-                )
-                .unwrap();
-        }
+        // Nothing to do.
     }
 
     fn get_finalized_function(&self, _func: &ObjectCompiledFunction) {
@@ -352,34 +370,10 @@ impl Backend for ObjectBackend {
     fn finalize_data(
         &mut self,
         _id: DataId,
-        data: &ObjectCompiledData,
-        namespace: &ModuleNamespace<Self>,
+        _data: &ObjectCompiledData,
+        _namespace: &ModuleNamespace<Self>,
     ) {
-        for &RelocRecord {
-            offset,
-            ref name,
-            kind,
-            encoding,
-            size,
-            addend,
-        } in &data.relocs
-        {
-            let offset = data.offset + u64::from(offset);
-            let symbol = self.get_symbol(namespace, name);
-            self.object
-                .add_relocation(
-                    data.section,
-                    Relocation {
-                        offset,
-                        size,
-                        kind,
-                        encoding,
-                        symbol,
-                        addend,
-                    },
-                )
-                .unwrap();
-        }
+        // Nothing to do.
     }
 
     fn get_finalized_data(&self, _data: &ObjectCompiledData) {
@@ -390,7 +384,36 @@ impl Backend for ObjectBackend {
         // Nothing to do.
     }
 
-    fn finish(self) -> ObjectProduct {
+    fn finish(mut self, namespace: &ModuleNamespace<Self>) -> ObjectProduct {
+        let mut symbol_relocs = Vec::new();
+        mem::swap(&mut symbol_relocs, &mut self.relocs);
+        for symbol in symbol_relocs {
+            for &RelocRecord {
+                offset,
+                ref name,
+                kind,
+                encoding,
+                size,
+                addend,
+            } in &symbol.relocs
+            {
+                let target_symbol = self.get_symbol(namespace, name);
+                self.object
+                    .add_relocation(
+                        symbol.section,
+                        Relocation {
+                            offset: symbol.offset + u64::from(offset),
+                            size,
+                            kind,
+                            encoding,
+                            symbol: target_symbol,
+                            addend,
+                        },
+                    )
+                    .unwrap();
+            }
+        }
+
         ObjectProduct {
             object: self.object,
             functions: self.functions,
@@ -401,7 +424,7 @@ impl Backend for ObjectBackend {
 }
 
 impl ObjectBackend {
-    // This should only be called during finalization because it creates
+    // This should only be called during finish because it creates
     // symbols for missing libcalls.
     fn get_symbol(
         &mut self,
@@ -432,7 +455,8 @@ impl ObjectBackend {
                         kind: SymbolKind::Text,
                         scope: SymbolScope::Unknown,
                         weak: false,
-                        section: None,
+                        section: SymbolSection::Undefined,
+                        flags: SymbolFlags::None,
                     });
                     self.libcalls.insert(*libcall, symbol);
                     symbol
@@ -454,20 +478,8 @@ fn translate_linkage(linkage: Linkage) -> (SymbolScope, bool) {
     (scope, weak)
 }
 
-#[derive(Clone)]
-pub struct ObjectCompiledFunction {
-    offset: u64,
-    size: u32,
-    section: SectionId,
-    relocs: Vec<RelocRecord>,
-}
-
-#[derive(Clone)]
-pub struct ObjectCompiledData {
-    offset: u64,
-    section: SectionId,
-    relocs: Vec<RelocRecord>,
-}
+pub struct ObjectCompiledFunction;
+pub struct ObjectCompiledData;
 
 /// This is the output of `Module`'s
 /// [`finish`](../cranelift_module/struct.Module.html#method.finish) function.
@@ -481,7 +493,7 @@ pub struct ObjectProduct {
     /// Symbol IDs for data objects (both declared and defined).
     pub data_objects: SecondaryMap<DataId, Option<SymbolId>>,
     /// Trap sites for defined functions.
-    pub traps: SecondaryMap<FuncId, Vec<ObjectTrapSite>>,
+    pub traps: SecondaryMap<FuncId, Vec<TrapSite>>,
 }
 
 impl ObjectProduct {
@@ -505,6 +517,13 @@ impl ObjectProduct {
 }
 
 #[derive(Clone)]
+struct SymbolRelocs {
+    section: SectionId,
+    offset: u64,
+    relocs: Vec<RelocRecord>,
+}
+
+#[derive(Clone)]
 struct RelocRecord {
     offset: CodeOffset,
     name: ir::ExternalName,
@@ -514,13 +533,22 @@ struct RelocRecord {
     addend: Addend,
 }
 
-#[derive(Default)]
 struct ObjectRelocSink {
+    format: BinaryFormat,
     relocs: Vec<RelocRecord>,
 }
 
+impl ObjectRelocSink {
+    fn new(format: BinaryFormat) -> Self {
+        Self {
+            format,
+            relocs: vec![],
+        }
+    }
+}
+
 impl RelocSink for ObjectRelocSink {
-    fn reloc_ebb(&mut self, _offset: CodeOffset, _reloc: Reloc, _ebb_offset: CodeOffset) {
+    fn reloc_block(&mut self, _offset: CodeOffset, _reloc: Reloc, _block_offset: CodeOffset) {
         unimplemented!();
     }
 
@@ -529,7 +557,7 @@ impl RelocSink for ObjectRelocSink {
         offset: CodeOffset,
         reloc: Reloc,
         name: &ir::ExternalName,
-        addend: Addend,
+        mut addend: Addend,
     ) {
         let (kind, encoding, size) = match reloc {
             Reloc::Abs4 => (RelocationKind::Absolute, RelocationEncoding::Generic, 32),
@@ -544,6 +572,35 @@ impl RelocSink for ObjectRelocSink {
                 32,
             ),
             Reloc::X86GOTPCRel4 => (RelocationKind::GotRelative, RelocationEncoding::Generic, 32),
+
+            Reloc::ElfX86_64TlsGd => {
+                assert_eq!(
+                    self.format,
+                    BinaryFormat::Elf,
+                    "ElfX86_64TlsGd is not supported for this file format"
+                );
+                (
+                    RelocationKind::Elf(goblin::elf64::reloc::R_X86_64_TLSGD),
+                    RelocationEncoding::Generic,
+                    32,
+                )
+            }
+            Reloc::MachOX86_64Tlv => {
+                assert_eq!(
+                    self.format,
+                    BinaryFormat::Macho,
+                    "MachOX86_64Tlv is not supported for this file format"
+                );
+                addend += 4; // X86_64_RELOC_TLV has an implicit addend of -4
+                (
+                    RelocationKind::MachO {
+                        value: goblin::mach::relocation::X86_64_RELOC_TLV,
+                        relative: true,
+                    },
+                    RelocationEncoding::Generic,
+                    32,
+                )
+            }
             // FIXME
             _ => unimplemented!(),
         };

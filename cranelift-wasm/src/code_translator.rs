@@ -15,7 +15,7 @@
 //! are being translated:
 //!
 //! - the loads and stores need the memory base address;
-//! - the `get_global` et `set_global` instructions depends on how the globals are implemented;
+//! - the `get_global` and `set_global` instructions depend on how the globals are implemented;
 //! - `memory.size` and `memory.grow` are runtime functions;
 //! - `call_indirect` has to translate the function index into the address of where this
 //!    is;
@@ -26,9 +26,9 @@ use super::{hash_map, HashMap};
 use crate::environ::{FuncEnvironment, GlobalVariable, ReturnMode, WasmResult};
 use crate::state::{ControlStackFrame, ElseData, FuncTranslationState, ModuleTranslationState};
 use crate::translation_utils::{
-    blocktype_params_results, ebb_with_params, f32_translation, f64_translation,
+    block_with_params, blocktype_params_results, f32_translation, f64_translation,
 };
-use crate::translation_utils::{FuncIndex, MemoryIndex, SignatureIndex, TableIndex};
+use crate::translation_utils::{FuncIndex, GlobalIndex, MemoryIndex, SignatureIndex, TableIndex};
 use crate::wasm_unsupported;
 use core::{i32, u32};
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
@@ -38,6 +38,7 @@ use cranelift_codegen::ir::{
 };
 use cranelift_codegen::packed_option::ReservedValue;
 use wasmer_clif_fork_frontend::{FunctionBuilder, Variable};
+use std::vec::Vec;
 use wasmparser::{MemoryImmediate, Operator};
 
 // Clippy warns about "flags: _" but its important to document that the flags field is ignored
@@ -94,6 +95,10 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
                     let flags = ir::MemFlags::trusted();
                     builder.ins().load(ty, flags, addr, offset)
                 }
+                GlobalVariable::Custom => environ.translate_custom_global_get(
+                    builder.cursor(),
+                    GlobalIndex::from_u32(*global_index),
+                )?,
             };
             state.push1(val);
         }
@@ -107,6 +112,14 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
                     debug_assert_eq!(ty, builder.func.dfg.value_type(val));
                     builder.ins().store(flags, val, addr, offset);
                 }
+                GlobalVariable::Custom => {
+                    let val = state.pop1();
+                    environ.translate_custom_global_set(
+                        builder.cursor(),
+                        GlobalIndex::from_u32(*global_index),
+                        val,
+                    )?;
+                }
             }
         }
         /********************************* Stack misc ***************************************
@@ -119,6 +132,13 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
             let (arg1, arg2, cond) = state.pop3();
             state.push1(builder.ins().select(cond, arg1, arg2));
         }
+        Operator::TypedSelect { ty: _ } => {
+            // We ignore the explicit type parameter as it is only needed for
+            // validation, which we require to have been performed before
+            // translation.
+            let (arg1, arg2, cond) = state.pop3();
+            state.push1(builder.ins().select(cond, arg1, arg2));
+        }
         Operator::Nop => {
             // We do nothing
         }
@@ -127,32 +147,34 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
             state.reachable = false;
         }
         /***************************** Control flow blocks **********************************
-         *  When starting a control flow block, we create a new `Ebb` that will hold the code
+         *  When starting a control flow block, we create a new `Block` that will hold the code
          *  after the block, and we push a frame on the control stack. Depending on the type
-         *  of block, we create a new `Ebb` for the body of the block with an associated
+         *  of block, we create a new `Block` for the body of the block with an associated
          *  jump instruction.
          *
          *  The `End` instruction pops the last control frame from the control stack, seals
          *  the destination block (since `br` instructions targeting it only appear inside the
          *  block and have already been translated) and modify the value stack to use the
-         *  possible `Ebb`'s arguments values.
+         *  possible `Block`'s arguments values.
          ***********************************************************************************/
         Operator::Block { ty } => {
             let (params, results) = blocktype_params_results(module_translation_state, *ty)?;
-            let next = ebb_with_params(builder, results, environ)?;
+            let next = block_with_params(builder, results, environ)?;
             state.push_block(next, params.len(), results.len());
         }
         Operator::Loop { ty } => {
             let (params, results) = blocktype_params_results(module_translation_state, *ty)?;
-            let loop_body = ebb_with_params(builder, params, environ)?;
-            let next = ebb_with_params(builder, results, environ)?;
+            let loop_body = block_with_params(builder, params, environ)?;
+            let next = block_with_params(builder, results, environ)?;
             builder.ins().jump(loop_body, state.peekn(params.len()));
             state.push_loop(loop_body, next, params.len(), results.len());
 
-            // Pop the initial `Ebb` actuals and replace them with the `Ebb`'s
+            // Pop the initial `Block` actuals and replace them with the `Block`'s
             // params since control flow joins at the top of the loop.
             state.popn(params.len());
-            state.stack.extend_from_slice(builder.ebb_params(loop_body));
+            state
+                .stack
+                .extend_from_slice(builder.block_params(loop_body));
 
             builder.switch_to_block(loop_body);
             environ.translate_loop_header(builder.cursor())?;
@@ -163,12 +185,12 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
             let (params, results) = blocktype_params_results(module_translation_state, *ty)?;
             let (destination, else_data) = if params == results {
                 // It is possible there is no `else` block, so we will only
-                // allocate an ebb for it if/when we find the `else`. For now,
+                // allocate an block for it if/when we find the `else`. For now,
                 // we if the condition isn't true, then we jump directly to the
-                // destination ebb following the whole `if...end`. If we do end
-                // up discovering an `else`, then we will allocate an ebb for it
+                // destination block following the whole `if...end`. If we do end
+                // up discovering an `else`, then we will allocate an block for it
                 // and go back and patch the jump.
-                let destination = ebb_with_params(builder, results, environ)?;
+                let destination = block_with_params(builder, results, environ)?;
                 let branch_inst = builder
                     .ins()
                     .brz(val, destination, state.peekn(params.len()));
@@ -176,8 +198,8 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
             } else {
                 // The `if` type signature is not valid without an `else` block,
                 // so we eagerly allocate the `else` block here.
-                let destination = ebb_with_params(builder, results, environ)?;
-                let else_block = ebb_with_params(builder, params, environ)?;
+                let destination = block_with_params(builder, results, environ)?;
+                let else_block = block_with_params(builder, params, environ)?;
                 builder
                     .ins()
                     .brz(val, else_block, state.peekn(params.len()));
@@ -185,15 +207,12 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
                 (destination, ElseData::WithElse { else_block })
             };
 
-            #[cfg(feature = "basic-blocks")]
-            {
-                let next_ebb = builder.create_ebb();
-                builder.ins().jump(next_ebb, &[]);
-                builder.seal_block(next_ebb); // Only predecessor is the current block.
-                builder.switch_to_block(next_ebb);
-            }
+            let next_block = builder.create_block();
+            builder.ins().jump(next_block, &[]);
+            builder.seal_block(next_block); // Only predecessor is the current block.
+            builder.switch_to_block(next_block);
 
-            // Here we append an argument to an Ebb targeted by an argumentless jump instruction
+            // Here we append an argument to an Block targeted by an argumentless jump instruction
             // But in fact there are two cases:
             // - either the If does not have a Else clause, in that case ty = EmptyBlock
             //   and we add nothing;
@@ -222,20 +241,20 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
                         // We have a branch from the head of the `if` to the `else`.
                         state.reachable = true;
 
-                        // Ensure we have an ebb for the `else` block (it may have
+                        // Ensure we have an block for the `else` block (it may have
                         // already been pre-allocated, see `ElseData` for details).
-                        let else_ebb = match *else_data {
+                        let else_block = match *else_data {
                             ElseData::NoElse { branch_inst } => {
                                 let (params, _results) =
                                     blocktype_params_results(module_translation_state, blocktype)?;
                                 debug_assert_eq!(params.len(), num_return_values);
-                                let else_ebb = ebb_with_params(builder, params, environ)?;
+                                let else_block = block_with_params(builder, params, environ)?;
                                 builder.ins().jump(destination, state.peekn(params.len()));
                                 state.popn(params.len());
 
-                                builder.change_jump_destination(branch_inst, else_ebb);
-                                builder.seal_block(else_ebb);
-                                else_ebb
+                                builder.change_jump_destination(branch_inst, else_block);
+                                builder.seal_block(else_block);
+                                else_block
                             }
                             ElseData::WithElse { else_block } => {
                                 builder
@@ -256,7 +275,7 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
                         // `if` so that we wouldn't have to save the parameters in the
                         // `ControlStackFrame` as another `Vec` allocation.
 
-                        builder.switch_to_block(else_ebb);
+                        builder.switch_to_block(else_block);
 
                         // We don't bother updating the control frame's `ElseData`
                         // to `WithElse` because nothing else will read it.
@@ -267,12 +286,14 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
         }
         Operator::End => {
             let frame = state.control_stack.pop().unwrap();
+            let next_block = frame.following_code();
 
             if !builder.is_unreachable() || !builder.is_pristine() {
                 let return_count = frame.num_return_values();
-                builder
-                    .ins()
-                    .jump(frame.following_code(), state.peekn(return_count));
+                let return_args = state.peekn_mut(return_count);
+                let next_block_types = builder.func.dfg.block_param_types(next_block);
+                bitcast_arguments(return_args, &next_block_types, builder);
+                builder.ins().jump(frame.following_code(), return_args);
                 // You might expect that if we just finished an `if` block that
                 // didn't have a corresponding `else` block, then we would clean
                 // up our duplicate set of parameters that we pushed earlier
@@ -280,8 +301,8 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
                 // since we truncate the stack back to the original height
                 // below.
             }
-            builder.switch_to_block(frame.following_code());
-            builder.seal_block(frame.following_code());
+            builder.switch_to_block(next_block);
+            builder.seal_block(next_block);
             // If it is a loop we also have to seal the body loop block
             if let ControlStackFrame::Loop { header, .. } = frame {
                 builder.seal_block(header)
@@ -289,26 +310,26 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
             state.stack.truncate(frame.original_stack_size());
             state
                 .stack
-                .extend_from_slice(builder.ebb_params(frame.following_code()));
+                .extend_from_slice(builder.block_params(next_block));
         }
         /**************************** Branch instructions *********************************
          * The branch instructions all have as arguments a target nesting level, which
          * corresponds to how many control stack frames do we have to pop to get the
-         * destination `Ebb`.
+         * destination `Block`.
          *
-         * Once the destination `Ebb` is found, we sometimes have to declare a certain depth
+         * Once the destination `Block` is found, we sometimes have to declare a certain depth
          * of the stack unreachable, because some branch instructions are terminator.
          *
          * The `br_table` case is much more complicated because Cranelift's `br_table` instruction
          * does not support jump arguments like all the other branch instructions. That is why, in
-         * the case where we would use jump arguments for every other branch instructions, we
-         * need to split the critical edges leaving the `br_tables` by creating one `Ebb` per
-         * table destination; the `br_table` will point to these newly created `Ebbs` and these
-         * `Ebb`s contain only a jump instruction pointing to the final destination, this time with
+         * the case where we would use jump arguments for every other branch instruction, we
+         * need to split the critical edges leaving the `br_tables` by creating one `Block` per
+         * table destination; the `br_table` will point to these newly created `Blocks` and these
+         * `Block`s contain only a jump instruction pointing to the final destination, this time with
          * jump arguments.
          *
          * This system is also implemented in Cranelift's SSA construction algorithm, because
-         * `use_var` located in a destination `Ebb` of a `br_table` might trigger the addition
+         * `use_var` located in a destination `Block` of a `br_table` might trigger the addition
          * of jump arguments in each predecessor branch instruction, one of which might be a
          * `br_table`.
          ***********************************************************************************/
@@ -325,9 +346,17 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
                 };
                 (return_count, frame.br_destination())
             };
-            builder
-                .ins()
-                .jump(br_destination, state.peekn(return_count));
+
+            // Bitcast any vector arguments to their default type, I8X16, before jumping.
+            let destination_args = state.peekn_mut(return_count);
+            let destination_types = builder.func.dfg.block_param_types(br_destination);
+            bitcast_arguments(
+                destination_args,
+                &destination_types[..return_count],
+                builder,
+            );
+
+            builder.ins().jump(br_destination, destination_args);
             state.popn(return_count);
             state.reachable = false;
         }
@@ -354,59 +383,69 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
             if jump_args_count == 0 {
                 // No jump arguments
                 for depth in &*depths {
-                    let ebb = {
+                    let block = {
                         let i = state.control_stack.len() - 1 - (*depth as usize);
                         let frame = &mut state.control_stack[i];
                         frame.set_branched_to_exit();
                         frame.br_destination()
                     };
-                    data.push_entry(ebb);
+                    data.push_entry(block);
                 }
                 let jt = builder.create_jump_table(data);
-                let ebb = {
+                let block = {
                     let i = state.control_stack.len() - 1 - (default as usize);
                     let frame = &mut state.control_stack[i];
                     frame.set_branched_to_exit();
                     frame.br_destination()
                 };
-                builder.ins().br_table(val, ebb, jt);
+                builder.ins().br_table(val, block, jt);
             } else {
                 // Here we have jump arguments, but Cranelift's br_table doesn't support them
                 // We then proceed to split the edges going out of the br_table
                 let return_count = jump_args_count;
-                let mut dest_ebb_sequence = vec![];
-                let mut dest_ebb_map = HashMap::new();
+                let mut dest_block_sequence = vec![];
+                let mut dest_block_map = HashMap::new();
                 for depth in &*depths {
-                    let branch_ebb = match dest_ebb_map.entry(*depth as usize) {
+                    let branch_block = match dest_block_map.entry(*depth as usize) {
                         hash_map::Entry::Occupied(entry) => *entry.get(),
                         hash_map::Entry::Vacant(entry) => {
-                            let ebb = builder.create_ebb();
-                            dest_ebb_sequence.push((*depth as usize, ebb));
-                            *entry.insert(ebb)
+                            let block = builder.create_block();
+                            dest_block_sequence.push((*depth as usize, block));
+                            *entry.insert(block)
                         }
                     };
-                    data.push_entry(branch_ebb);
+                    data.push_entry(branch_block);
                 }
-                let default_branch_ebb = match dest_ebb_map.entry(default as usize) {
+                let default_branch_block = match dest_block_map.entry(default as usize) {
                     hash_map::Entry::Occupied(entry) => *entry.get(),
                     hash_map::Entry::Vacant(entry) => {
-                        let ebb = builder.create_ebb();
-                        dest_ebb_sequence.push((default as usize, ebb));
-                        *entry.insert(ebb)
+                        let block = builder.create_block();
+                        dest_block_sequence.push((default as usize, block));
+                        *entry.insert(block)
                     }
                 };
                 let jt = builder.create_jump_table(data);
-                builder.ins().br_table(val, default_branch_ebb, jt);
-                for (depth, dest_ebb) in dest_ebb_sequence {
-                    builder.switch_to_block(dest_ebb);
-                    builder.seal_block(dest_ebb);
-                    let real_dest_ebb = {
+                builder.ins().br_table(val, default_branch_block, jt);
+                for (depth, dest_block) in dest_block_sequence {
+                    builder.switch_to_block(dest_block);
+                    builder.seal_block(dest_block);
+                    let real_dest_block = {
                         let i = state.control_stack.len() - 1 - depth;
                         let frame = &mut state.control_stack[i];
                         frame.set_branched_to_exit();
                         frame.br_destination()
                     };
-                    builder.ins().jump(real_dest_ebb, state.peekn(return_count));
+
+                    // Bitcast any vector arguments to their default type, I8X16, before jumping.
+                    let destination_args = state.peekn_mut(return_count);
+                    let destination_types = builder.func.dfg.block_param_types(real_dest_block);
+                    bitcast_arguments(
+                        destination_args,
+                        &destination_types[..return_count],
+                        builder,
+                    );
+
+                    builder.ins().jump(real_dest_block, destination_args);
                 }
                 state.popn(return_count);
             }
@@ -420,10 +459,16 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
                 (return_count, frame.br_destination())
             };
             {
-                let args = state.peekn(return_count);
+                let return_args = state.peekn_mut(return_count);
+                let return_types = wasm_param_types(&builder.func.signature.returns, |i| {
+                    environ.is_wasm_return(&builder.func.signature, i)
+                });
+                bitcast_arguments(return_args, &return_types, builder);
                 match environ.return_mode() {
-                    ReturnMode::NormalReturns => builder.ins().return_(args),
-                    ReturnMode::FallthroughReturn => builder.ins().jump(br_destination, args),
+                    ReturnMode::NormalReturns => builder.ins().return_(return_args),
+                    ReturnMode::FallthroughReturn => {
+                        builder.ins().jump(br_destination, return_args)
+                    }
                 };
             }
             state.popn(return_count);
@@ -436,11 +481,21 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
          ************************************************************************************/
         Operator::Call { function_index } => {
             let (fref, num_args) = state.get_direct_func(builder.func, *function_index, environ)?;
+
+            // Bitcast any vector arguments to their default type, I8X16, before calling.
+            let callee_signature =
+                &builder.func.dfg.signatures[builder.func.dfg.ext_funcs[fref].signature];
+            let args = state.peekn_mut(num_args);
+            let types = wasm_param_types(&callee_signature.params, |i| {
+                environ.is_wasm_parameter(&callee_signature, i)
+            });
+            bitcast_arguments(args, &types, builder);
+
             let call = environ.translate_call(
                 builder.cursor(),
                 FuncIndex::from_u32(*function_index),
                 fref,
-                state.peekn(num_args),
+                args,
             )?;
             let inst_results = builder.inst_results(call);
             debug_assert_eq!(
@@ -459,6 +514,15 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
             let (sigref, num_args) = state.get_indirect_sig(builder.func, *index, environ)?;
             let table = state.get_table(builder.func, *table_index, environ)?;
             let callee = state.pop1();
+
+            // Bitcast any vector arguments to their default type, I8X16, before calling.
+            let callee_signature = &builder.func.dfg.signatures[sigref];
+            let args = state.peekn_mut(num_args);
+            let types = wasm_param_types(&callee_signature.params, |i| {
+                environ.is_wasm_parameter(&callee_signature, i)
+            });
+            bitcast_arguments(args, &types, builder);
+
             let call = environ.translate_call_indirect(
                 builder.cursor(),
                 TableIndex::from_u32(*table_index),
@@ -916,10 +980,11 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
         Operator::RefIsNull => {
             let arg = state.pop1();
             let val = builder.ins().is_null(arg);
-            state.push1(val);
+            let val_int = builder.ins().bint(I32, val);
+            state.push1(val_int);
         }
-        Operator::RefFunc { .. } => {
-            return Err(wasm_unsupported!("proposed ref operator {:?}", op))
+        Operator::RefFunc { function_index } => {
+            state.push1(environ.translate_ref_func(builder.cursor(), *function_index)?);
         }
         Operator::AtomicNotify { .. }
         | Operator::I32AtomicWait { .. }
@@ -1042,55 +1107,71 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
                 table,
             )?);
         }
-        Operator::TableCopy { .. } => {
-            // The WebAssembly MVP only supports one table and wasmparser will
-            // ensure that the table index specified is zero.
-            let dst_table_index = 0;
-            let dst_table = state.get_table(builder.func, dst_table_index, environ)?;
-            let src_table_index = 0;
-            let src_table = state.get_table(builder.func, src_table_index, environ)?;
+        Operator::TableGrow { table } => {
+            let delta = state.pop1();
+            let init_value = state.pop1();
+            state.push1(environ.translate_table_grow(
+                builder.cursor(),
+                *table,
+                delta,
+                init_value,
+            )?);
+        }
+        Operator::TableGet { table } => {
+            let index = state.pop1();
+            state.push1(environ.translate_table_get(builder.cursor(), *table, index)?);
+        }
+        Operator::TableSet { table } => {
+            let value = state.pop1();
+            let index = state.pop1();
+            environ.translate_table_set(builder.cursor(), *table, value, index)?;
+        }
+        Operator::TableCopy {
+            dst_table: dst_table_index,
+            src_table: src_table_index,
+        } => {
+            let dst_table = state.get_table(builder.func, *dst_table_index, environ)?;
+            let src_table = state.get_table(builder.func, *src_table_index, environ)?;
             let len = state.pop1();
             let src = state.pop1();
             let dest = state.pop1();
             environ.translate_table_copy(
                 builder.cursor(),
-                TableIndex::from_u32(dst_table_index),
+                TableIndex::from_u32(*dst_table_index),
                 dst_table,
-                TableIndex::from_u32(src_table_index),
+                TableIndex::from_u32(*src_table_index),
                 src_table,
                 dest,
                 src,
                 len,
             )?;
         }
-        Operator::TableInit { segment, table: _ } => {
-            // The WebAssembly MVP only supports one table and we assume it here.
-            let table_index = 0;
-            let table = state.get_table(builder.func, table_index, environ)?;
+        Operator::TableFill { table } => {
+            let len = state.pop1();
+            let val = state.pop1();
+            let dest = state.pop1();
+            environ.translate_table_fill(builder.cursor(), *table, dest, val, len)?;
+        }
+        Operator::TableInit {
+            segment,
+            table: table_index,
+        } => {
+            let table = state.get_table(builder.func, *table_index, environ)?;
             let len = state.pop1();
             let src = state.pop1();
             let dest = state.pop1();
             environ.translate_table_init(
                 builder.cursor(),
                 *segment,
-                TableIndex::from_u32(table_index),
+                TableIndex::from_u32(*table_index),
                 table,
                 dest,
                 src,
                 len,
             )?;
         }
-        Operator::TableFill { .. } => {
-            return Err(wasm_unsupported!("proposed table operator {:?}", op));
-        }
         Operator::ElemDrop { segment } => {
             environ.translate_elem_drop(builder.cursor(), *segment)?;
-        }
-        Operator::TableGet { .. } | Operator::TableSet { .. } | Operator::TableGrow { .. } => {
-            return Err(wasm_unsupported!(
-                "proposed reference types operator {:?}",
-                op
-            ));
         }
         Operator::V128Const { value } => {
             let data = value.bytes().to_vec().into();
@@ -1108,6 +1189,32 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
         | Operator::I64x2Splat
         | Operator::F32x4Splat
         | Operator::F64x2Splat => {
+            let splatted = builder.ins().splat(type_of(op), state.pop1());
+            state.push1(splatted)
+        }
+        Operator::V8x16LoadSplat {
+            memarg: MemoryImmediate { flags: _, offset },
+        }
+        | Operator::V16x8LoadSplat {
+            memarg: MemoryImmediate { flags: _, offset },
+        }
+        | Operator::V32x4LoadSplat {
+            memarg: MemoryImmediate { flags: _, offset },
+        }
+        | Operator::V64x2LoadSplat {
+            memarg: MemoryImmediate { flags: _, offset },
+        } => {
+            // TODO: For spec compliance, this is initially implemented as a combination of `load +
+            // splat` but could be implemented eventually as a single instruction (`load_splat`).
+            // See https://github.com/bytecodealliance/cranelift/issues/1348.
+            translate_load(
+                *offset,
+                ir::Opcode::Load,
+                type_of(op).lane_type(),
+                builder,
+                state,
+                environ,
+            )?;
             let splatted = builder.ins().splat(type_of(op), state.pop1());
             state.push1(splatted)
         }
@@ -1181,6 +1288,26 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
             let (a, b) = pop2_with_bitcast(state, type_of(op), builder);
             state.push1(builder.ins().usub_sat(a, b))
         }
+        Operator::I8x16MinS | Operator::I16x8MinS | Operator::I32x4MinS => {
+            let (a, b) = pop2_with_bitcast(state, type_of(op), builder);
+            state.push1(builder.ins().imin(a, b))
+        }
+        Operator::I8x16MinU | Operator::I16x8MinU | Operator::I32x4MinU => {
+            let (a, b) = pop2_with_bitcast(state, type_of(op), builder);
+            state.push1(builder.ins().umin(a, b))
+        }
+        Operator::I8x16MaxS | Operator::I16x8MaxS | Operator::I32x4MaxS => {
+            let (a, b) = pop2_with_bitcast(state, type_of(op), builder);
+            state.push1(builder.ins().imax(a, b))
+        }
+        Operator::I8x16MaxU | Operator::I16x8MaxU | Operator::I32x4MaxU => {
+            let (a, b) = pop2_with_bitcast(state, type_of(op), builder);
+            state.push1(builder.ins().umax(a, b))
+        }
+        Operator::I8x16RoundingAverageU | Operator::I16x8RoundingAverageU => {
+            let (a, b) = pop2_with_bitcast(state, type_of(op), builder);
+            state.push1(builder.ins().avg_round(a, b))
+        }
         Operator::I8x16Neg | Operator::I16x8Neg | Operator::I32x4Neg | Operator::I64x2Neg => {
             let a = pop1_with_bitcast(state, type_of(op), builder);
             state.push1(builder.ins().ineg(a))
@@ -1188,6 +1315,10 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
         Operator::I16x8Mul | Operator::I32x4Mul => {
             let (a, b) = pop2_with_bitcast(state, type_of(op), builder);
             state.push1(builder.ins().imul(a, b))
+        }
+        Operator::V128AndNot => {
+            let (a, b) = pop2_with_bitcast(state, type_of(op), builder);
+            state.push1(builder.ins().band_not(a, b))
         }
         Operator::V128Not => {
             let a = state.pop1();
@@ -1359,19 +1490,12 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
         | Operator::I32x4WidenLowI16x8U { .. }
         | Operator::I32x4WidenHighI16x8U { .. }
         | Operator::V8x16Swizzle
-        | Operator::V8x16LoadSplat { .. }
-        | Operator::V16x8LoadSplat { .. }
-        | Operator::V32x4LoadSplat { .. }
-        | Operator::V64x2LoadSplat { .. }
         | Operator::I16x8Load8x8S { .. }
         | Operator::I16x8Load8x8U { .. }
         | Operator::I32x4Load16x4S { .. }
         | Operator::I32x4Load16x4U { .. }
         | Operator::I64x2Load32x2S { .. }
-        | Operator::I64x2Load32x2U { .. }
-        | Operator::I8x16RoundingAverageU { .. }
-        | Operator::I16x8RoundingAverageU { .. }
-        | Operator::V128AndNot { .. } => {
+        | Operator::I64x2Load32x2U { .. } => {
             return Err(wasm_unsupported!("proposed SIMD operator {:?}", op));
         }
     };
@@ -1396,7 +1520,7 @@ fn translate_unreachable_operator<FE: FuncEnvironment + ?Sized>(
             // Push a placeholder control stack entry. The if isn't reachable,
             // so we don't have any branches anywhere.
             state.push_if(
-                ir::Ebb::reserved_value(),
+                ir::Block::reserved_value(),
                 ElseData::NoElse {
                     branch_inst: ir::Inst::reserved_value(),
                 },
@@ -1406,7 +1530,7 @@ fn translate_unreachable_operator<FE: FuncEnvironment + ?Sized>(
             );
         }
         Operator::Loop { ty: _ } | Operator::Block { ty: _ } => {
-            state.push_block(ir::Ebb::reserved_value(), 0, 0);
+            state.push_block(ir::Block::reserved_value(), 0, 0);
         }
         Operator::Else => {
             let i = state.control_stack.len() - 1;
@@ -1425,21 +1549,21 @@ fn translate_unreachable_operator<FE: FuncEnvironment + ?Sized>(
                         // We have a branch from the head of the `if` to the `else`.
                         state.reachable = true;
 
-                        let else_ebb = match *else_data {
+                        let else_block = match *else_data {
                             ElseData::NoElse { branch_inst } => {
                                 let (params, _results) =
                                     blocktype_params_results(module_translation_state, blocktype)?;
-                                let else_ebb = ebb_with_params(builder, params, environ)?;
+                                let else_block = block_with_params(builder, params, environ)?;
 
                                 // We change the target of the branch instruction.
-                                builder.change_jump_destination(branch_inst, else_ebb);
-                                builder.seal_block(else_ebb);
-                                else_ebb
+                                builder.change_jump_destination(branch_inst, else_block);
+                                builder.seal_block(else_block);
+                                else_block
                             }
                             ElseData::WithElse { else_block } => else_block,
                         };
 
-                        builder.switch_to_block(else_ebb);
+                        builder.switch_to_block(else_block);
 
                         // Again, no need to push the parameters for the `else`,
                         // since we already did when we saw the original `if`. See
@@ -1494,7 +1618,7 @@ fn translate_unreachable_operator<FE: FuncEnvironment + ?Sized>(
 
                 // And add the return values of the block but only if the next block is reachable
                 // (which corresponds to testing if the stack depth is 1)
-                stack.extend_from_slice(builder.ebb_params(frame.following_code()));
+                stack.extend_from_slice(builder.block_params(frame.following_code()));
                 state.reachable = true;
             }
         }
@@ -1632,21 +1756,23 @@ fn translate_br_if(
 ) {
     let val = state.pop1();
     let (br_destination, inputs) = translate_br_if_args(relative_depth, state);
+
+    // Bitcast any vector arguments to their default type, I8X16, before jumping.
+    let destination_types = builder.func.dfg.block_param_types(br_destination);
+    bitcast_arguments(inputs, &destination_types[..inputs.len()], builder);
+
     builder.ins().brnz(val, br_destination, inputs);
 
-    #[cfg(feature = "basic-blocks")]
-    {
-        let next_ebb = builder.create_ebb();
-        builder.ins().jump(next_ebb, &[]);
-        builder.seal_block(next_ebb); // The only predecessor is the current block.
-        builder.switch_to_block(next_ebb);
-    }
+    let next_block = builder.create_block();
+    builder.ins().jump(next_block, &[]);
+    builder.seal_block(next_block); // The only predecessor is the current block.
+    builder.switch_to_block(next_block);
 }
 
 fn translate_br_if_args(
     relative_depth: u32,
     state: &mut FuncTranslationState,
-) -> (ir::Ebb, &[ir::Value]) {
+) -> (ir::Block, &mut [ir::Value]) {
     let i = state.control_stack.len() - 1 - (relative_depth as usize);
     let (return_count, br_destination) = {
         let frame = &mut state.control_stack[i];
@@ -1660,7 +1786,7 @@ fn translate_br_if_args(
         };
         (return_count, frame.br_destination())
     };
-    let inputs = state.peekn(return_count);
+    let inputs = state.peekn_mut(return_count);
     (br_destination, inputs)
 }
 
@@ -1672,12 +1798,14 @@ fn type_of(operator: &Operator) -> Type {
         | Operator::V128Const { .. }
         | Operator::V128Not
         | Operator::V128And
+        | Operator::V128AndNot
         | Operator::V128Or
         | Operator::V128Xor
         | Operator::V128Bitselect => I8X16, // default type representing V128
 
         Operator::V8x16Shuffle { .. }
         | Operator::I8x16Splat
+        | Operator::V8x16LoadSplat { .. }
         | Operator::I8x16ExtractLaneS { .. }
         | Operator::I8x16ExtractLaneU { .. }
         | Operator::I8x16ReplaceLane { .. }
@@ -1703,9 +1831,15 @@ fn type_of(operator: &Operator) -> Type {
         | Operator::I8x16Sub
         | Operator::I8x16SubSaturateS
         | Operator::I8x16SubSaturateU
+        | Operator::I8x16MinS
+        | Operator::I8x16MinU
+        | Operator::I8x16MaxS
+        | Operator::I8x16MaxU
+        | Operator::I8x16RoundingAverageU
         | Operator::I8x16Mul => I8X16,
 
         Operator::I16x8Splat
+        | Operator::V16x8LoadSplat { .. }
         | Operator::I16x8ExtractLaneS { .. }
         | Operator::I16x8ExtractLaneU { .. }
         | Operator::I16x8ReplaceLane { .. }
@@ -1731,9 +1865,15 @@ fn type_of(operator: &Operator) -> Type {
         | Operator::I16x8Sub
         | Operator::I16x8SubSaturateS
         | Operator::I16x8SubSaturateU
+        | Operator::I16x8MinS
+        | Operator::I16x8MinU
+        | Operator::I16x8MaxS
+        | Operator::I16x8MaxU
+        | Operator::I16x8RoundingAverageU
         | Operator::I16x8Mul => I16X8,
 
         Operator::I32x4Splat
+        | Operator::V32x4LoadSplat { .. }
         | Operator::I32x4ExtractLane { .. }
         | Operator::I32x4ReplaceLane { .. }
         | Operator::I32x4Eq
@@ -1755,10 +1895,15 @@ fn type_of(operator: &Operator) -> Type {
         | Operator::I32x4Add
         | Operator::I32x4Sub
         | Operator::I32x4Mul
+        | Operator::I32x4MinS
+        | Operator::I32x4MinU
+        | Operator::I32x4MaxS
+        | Operator::I32x4MaxU
         | Operator::F32x4ConvertI32x4S
         | Operator::F32x4ConvertI32x4U => I32X4,
 
         Operator::I64x2Splat
+        | Operator::V64x2LoadSplat { .. }
         | Operator::I64x2ExtractLane { .. }
         | Operator::I64x2ReplaceLane { .. }
         | Operator::I64x2Neg
@@ -1815,7 +1960,8 @@ fn type_of(operator: &Operator) -> Type {
         | Operator::I64x2TruncSatF64x2U => F64X2,
 
         _ => unimplemented!(
-            "Currently only the SIMD instructions are translated to their return type: {:?}",
+            "Currently only SIMD instructions are mapped to their return type; the \
+             following instruction is not mapped: {:?}",
             operator
         ),
     }
@@ -1823,7 +1969,7 @@ fn type_of(operator: &Operator) -> Type {
 
 /// Some SIMD operations only operate on I8X16 in CLIF; this will convert them to that type by
 /// adding a raw_bitcast if necessary.
-fn optionally_bitcast_vector(
+pub fn optionally_bitcast_vector(
     value: Value,
     needed_type: Type,
     builder: &mut FunctionBuilder,
@@ -1858,4 +2004,42 @@ fn pop2_with_bitcast(
     let bitcast_a = optionally_bitcast_vector(a, needed_type, builder);
     let bitcast_b = optionally_bitcast_vector(b, needed_type, builder);
     (bitcast_a, bitcast_b)
+}
+
+/// A helper for bitcasting a sequence of values (e.g. function arguments). If a value is a
+/// vector type that does not match its expected type, this will modify the value in place to point
+/// to the result of a `raw_bitcast`. This conversion is necessary to translate Wasm code that
+/// uses `V128` as function parameters (or implicitly in block parameters) and still use specific
+/// CLIF types (e.g. `I32X4`) in the function body.
+pub fn bitcast_arguments(
+    arguments: &mut [Value],
+    expected_types: &[Type],
+    builder: &mut FunctionBuilder,
+) {
+    assert_eq!(arguments.len(), expected_types.len());
+    for (i, t) in expected_types.iter().enumerate() {
+        if t.is_vector() {
+            assert!(
+                builder.func.dfg.value_type(arguments[i]).is_vector(),
+                "unexpected type mismatch: expected {}, argument {} was actually of type {}",
+                t,
+                arguments[i],
+                builder.func.dfg.value_type(arguments[i])
+            );
+            arguments[i] = optionally_bitcast_vector(arguments[i], *t, builder)
+        }
+    }
+}
+
+/// A helper to extract all the `Type` listings of each variable in `params`
+/// for only parameters the return true for `is_wasm`, typically paired with
+/// `is_wasm_return` or `is_wasm_parameter`.
+pub fn wasm_param_types(params: &[ir::AbiParam], is_wasm: impl Fn(usize) -> bool) -> Vec<Type> {
+    let mut ret = Vec::with_capacity(params.len());
+    for (i, param) in params.iter().enumerate() {
+        if is_wasm(i) {
+            ret.push(param.value_type);
+        }
+    }
+    ret
 }

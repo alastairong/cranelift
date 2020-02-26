@@ -2,6 +2,7 @@
 
 use crate::container;
 use crate::traps::{FaerieTrapManifest, FaerieTrapSink};
+use anyhow::Error;
 use cranelift_codegen::binemit::{
     Addend, CodeOffset, NullStackmapSink, NullTrapSink, Reloc, RelocSink, Stackmap, StackmapSink,
 };
@@ -9,10 +10,10 @@ use cranelift_codegen::isa::TargetIsa;
 use cranelift_codegen::{self, binemit, ir};
 use cranelift_module::{
     Backend, DataContext, DataDescription, DataId, FuncId, Init, Linkage, ModuleError,
-    ModuleNamespace, ModuleResult,
+    ModuleNamespace, ModuleResult, TrapSite,
 };
 use faerie;
-use failure::Error;
+use std::convert::TryInto;
 use std::fs::File;
 use target_lexicon::Triple;
 
@@ -135,8 +136,10 @@ impl Backend for FaerieBackend {
         name: &str,
         linkage: Linkage,
         writable: bool,
+        tls: bool,
         align: Option<u8>,
     ) {
+        assert!(!tls, "Faerie doesn't yet support TLS");
         self.artifact
             .declare(name, translate_data_linkage(linkage, writable, align))
             .expect("inconsistent declarations");
@@ -200,15 +203,42 @@ impl Backend for FaerieBackend {
         Ok(FaerieCompiledFunction { code_length })
     }
 
+    fn define_function_bytes(
+        &mut self,
+        _id: FuncId,
+        name: &str,
+        bytes: &[u8],
+        _namespace: &ModuleNamespace<Self>,
+        traps: Vec<TrapSite>,
+    ) -> ModuleResult<FaerieCompiledFunction> {
+        let code_length: u32 = match bytes.len().try_into() {
+            Ok(code_length) => code_length,
+            _ => Err(ModuleError::FunctionTooLarge(name.to_string()))?,
+        };
+
+        if let Some(ref mut trap_manifest) = self.trap_manifest {
+            let trap_sink = FaerieTrapSink::new_with_sites(name, code_length, traps);
+            trap_manifest.add_sink(trap_sink);
+        }
+
+        self.artifact
+            .define(name, bytes.to_vec())
+            .expect("inconsistent declaration");
+
+        Ok(FaerieCompiledFunction { code_length })
+    }
+
     fn define_data(
         &mut self,
         _id: DataId,
         name: &str,
         _writable: bool,
+        tls: bool,
         _align: Option<u8>,
         data_ctx: &DataContext,
         namespace: &ModuleNamespace<Self>,
     ) -> ModuleResult<FaerieCompiledData> {
+        assert!(!tls, "Faerie doesn't yet support TLS");
         let &DataDescription {
             ref init,
             ref function_decls,
@@ -216,20 +246,6 @@ impl Backend for FaerieBackend {
             ref function_relocs,
             ref data_relocs,
         } = data_ctx.description();
-
-        let size = init.size();
-        let mut bytes = Vec::with_capacity(size);
-        match *init {
-            Init::Uninitialized => {
-                panic!("data is not initialized yet");
-            }
-            Init::Zeros { .. } => {
-                bytes.resize(size, 0);
-            }
-            Init::Bytes { ref contents } => {
-                bytes.extend_from_slice(contents);
-            }
-        }
 
         for &(offset, id) in function_relocs {
             let to = &namespace.get_function_decl(&function_decls[id]).name;
@@ -256,9 +272,22 @@ impl Backend for FaerieBackend {
                 .map_err(|e| ModuleError::Backend(e.to_string()))?;
         }
 
-        self.artifact
-            .define(name, bytes)
-            .expect("inconsistent declaration");
+        match *init {
+            Init::Uninitialized => {
+                panic!("data is not initialized yet");
+            }
+            Init::Zeros { size } => {
+                self.artifact
+                    .define_zero_init(name, size)
+                    .expect("inconsistent declaration");
+            }
+            Init::Bytes { ref contents } => {
+                self.artifact
+                    .define(name, contents.to_vec())
+                    .expect("inconsistent declaration");
+            }
+        }
+
         Ok(FaerieCompiledData {})
     }
 
@@ -311,7 +340,7 @@ impl Backend for FaerieBackend {
         // Nothing to do.
     }
 
-    fn finish(self) -> FaerieProduct {
+    fn finish(self, _namespace: &ModuleNamespace<Self>) -> FaerieProduct {
         FaerieProduct {
             artifact: self.artifact,
             trap_manifest: self.trap_manifest,
@@ -387,7 +416,7 @@ struct FaerieRelocSink<'a> {
 }
 
 impl<'a> RelocSink for FaerieRelocSink<'a> {
-    fn reloc_ebb(&mut self, _offset: CodeOffset, _reloc: Reloc, _ebb_offset: CodeOffset) {
+    fn reloc_block(&mut self, _offset: CodeOffset, _reloc: Reloc, _block_offset: CodeOffset) {
         unimplemented!();
     }
 

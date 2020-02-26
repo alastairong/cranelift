@@ -1,7 +1,7 @@
 //! Computing stack layout.
 
 use crate::ir::stackslot::{StackOffset, StackSize, StackSlotKind};
-use crate::ir::StackSlots;
+use crate::ir::{StackLayoutInfo, StackSlots};
 use crate::result::{CodegenError, CodegenResult};
 use core::cmp::{max, min};
 
@@ -44,9 +44,10 @@ pub fn layout_stack(
     // require the stack to be aligned.
 
     let mut incoming_min = 0;
+    let mut incoming_max = 0;
     let mut outgoing_max = 0;
     let mut min_align = alignment;
-    let mut must_align = is_leaf;
+    let mut must_align = !is_leaf;
 
     for slot in frame.values() {
         if slot.size > max_size {
@@ -56,6 +57,7 @@ pub fn layout_stack(
         match slot.kind {
             StackSlotKind::IncomingArg => {
                 incoming_min = min(incoming_min, slot.offset.unwrap());
+                incoming_max = max(incoming_max, slot.offset.unwrap() + slot.size as i32);
             }
             StackSlotKind::OutgoingArg => {
                 let offset = slot
@@ -119,8 +121,14 @@ pub fn layout_stack(
         offset &= -(alignment as StackOffset);
     }
 
+    // Set the computed layout information for the frame
     let frame_size = (offset as StackSize).wrapping_neg();
-    frame.frame_size = Some(frame_size);
+    let inbound_args_size = incoming_max as u32;
+    frame.layout_info = Some(StackLayoutInfo {
+        frame_size,
+        inbound_args_size,
+    });
+
     Ok(frame_size)
 }
 
@@ -137,7 +145,7 @@ mod tests {
         let sss = &mut StackSlots::new();
 
         // For all these test cases, assume it will call.
-        let is_leaf = true;
+        let is_leaf = false;
 
         // An empty layout should have 0-sized stack frame.
         assert_eq!(layout_stack(sss, is_leaf, 1), Ok(0));

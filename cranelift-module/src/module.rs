@@ -7,12 +7,14 @@
 
 use super::HashMap;
 use crate::data_context::DataContext;
+use crate::traps::TrapSite;
 use crate::Backend;
 use cranelift_codegen::binemit::{self, CodeInfo};
 use cranelift_codegen::entity::{entity_impl, PrimaryMap};
 use cranelift_codegen::{ir, isa, CodegenError, Context};
 use log::info;
 use std::borrow::ToOwned;
+use std::convert::TryInto;
 use std::string::String;
 use std::vec::Vec;
 use thiserror::Error;
@@ -139,6 +141,9 @@ pub enum ModuleError {
     /// Indicates an identifier was defined, but was declared as an import
     #[error("Invalid to define identifier declared as an import: {0}")]
     InvalidImportDefinition(String),
+    /// Indicates a too-long function was defined
+    #[error("Function {0} exceeds the maximum function size")]
+    FunctionTooLarge(String),
     /// Wraps a `cranelift-codegen` error
     #[error("Compilation error: {0}")]
     Compilation(#[from] CodegenError),
@@ -183,6 +188,7 @@ pub struct DataDeclaration {
     pub name: String,
     pub linkage: Linkage,
     pub writable: bool,
+    pub tls: bool,
     pub align: Option<u8>,
 }
 
@@ -201,10 +207,14 @@ impl<B> ModuleData<B>
 where
     B: Backend,
 {
-    fn merge(&mut self, linkage: Linkage, writable: bool, align: Option<u8>) {
+    fn merge(&mut self, linkage: Linkage, writable: bool, tls: bool, align: Option<u8>) {
         self.decl.linkage = Linkage::merge(self.decl.linkage, linkage);
         self.decl.writable = self.decl.writable || writable;
         self.decl.align = self.decl.align.max(align);
+        assert_eq!(
+            self.decl.tls, tls,
+            "Can't change TLS data object to normal or in the opposite way",
+        );
     }
 }
 
@@ -455,6 +465,7 @@ where
         name: &str,
         linkage: Linkage,
         writable: bool,
+        tls: bool,
         align: Option<u8>, // An alignment bigger than 128 is unlikely
     ) -> ModuleResult<DataId> {
         // TODO: Can we avoid allocating names so often?
@@ -463,12 +474,13 @@ where
             Occupied(entry) => match *entry.get() {
                 FuncOrDataId::Data(id) => {
                     let existing = &mut self.contents.data_objects[id];
-                    existing.merge(linkage, writable, align);
+                    existing.merge(linkage, writable, tls, align);
                     self.backend.declare_data(
                         id,
                         name,
                         existing.decl.linkage,
                         existing.decl.writable,
+                        existing.decl.tls,
                         existing.decl.align,
                     );
                     Ok(id)
@@ -484,13 +496,14 @@ where
                         name: name.to_owned(),
                         linkage,
                         writable,
+                        tls,
                         align,
                     },
                     compiled: None,
                 });
                 entry.insert(FuncOrDataId::Data(id));
                 self.backend
-                    .declare_data(id, name, linkage, writable, align);
+                    .declare_data(id, name, linkage, writable, tls, align);
                 Ok(id)
             }
         }
@@ -521,6 +534,7 @@ where
             name: ir::ExternalName::user(1, data.as_u32()),
             offset: ir::immediates::Imm64::new(0),
             colocated,
+            tls: decl.tls,
         })
     }
 
@@ -573,6 +587,48 @@ where
         Ok(total_size)
     }
 
+    /// Define a function, taking the function body from the given `bytes`.
+    ///
+    /// This function is generally only useful if you need to precisely specify
+    /// the emitted instructions for some reason; otherwise, you should use
+    /// `define_function`.
+    ///
+    /// Returns the size of the function's code.
+    pub fn define_function_bytes(
+        &mut self,
+        func: FuncId,
+        bytes: &[u8],
+        traps: Vec<TrapSite>,
+    ) -> ModuleResult<binemit::CodeOffset> {
+        info!("defining function {} with bytes", func);
+        let info = &self.contents.functions[func];
+        if info.compiled.is_some() {
+            return Err(ModuleError::DuplicateDefinition(info.decl.name.clone()));
+        }
+        if !info.decl.linkage.is_definable() {
+            return Err(ModuleError::InvalidImportDefinition(info.decl.name.clone()));
+        }
+
+        let total_size: u32 = match bytes.len().try_into() {
+            Ok(total_size) => total_size,
+            _ => Err(ModuleError::FunctionTooLarge(info.decl.name.clone()))?,
+        };
+
+        let compiled = Some(self.backend.define_function_bytes(
+            func,
+            &info.decl.name,
+            bytes,
+            &ModuleNamespace::<B> {
+                contents: &self.contents,
+            },
+            traps,
+        )?);
+
+        self.contents.functions[func].compiled = compiled;
+        self.functions_to_finalize.push(func);
+        Ok(total_size)
+    }
+
     /// Define a data object, producing the data contents from the given `DataContext`.
     pub fn define_data(&mut self, data: DataId, data_ctx: &DataContext) -> ModuleResult<()> {
         let compiled = {
@@ -587,6 +643,7 @@ where
                 data,
                 &info.decl.name,
                 info.decl.writable,
+                info.decl.tls,
                 info.decl.align,
                 data_ctx,
                 &ModuleNamespace::<B> {
@@ -648,6 +705,9 @@ where
     ///
     /// Use `get_finalized_function` and `get_finalized_data` to obtain the final
     /// artifacts.
+    ///
+    /// This method is not relevant for `Backend` implementations that do not provide
+    /// `Backend::FinalizedFunction` or `Backend::FinalizedData`.
     pub fn finalize_definitions(&mut self) {
         for func in self.functions_to_finalize.drain(..) {
             let info = &self.contents.functions[func];
@@ -714,8 +774,9 @@ where
     /// Consume the module and return the resulting `Product`. Some `Backend`
     /// implementations may provide additional functionality available after
     /// a `Module` is complete.
-    pub fn finish(mut self) -> B::Product {
-        self.finalize_definitions();
-        self.backend.finish()
+    pub fn finish(self) -> B::Product {
+        self.backend.finish(&ModuleNamespace::<B> {
+            contents: &self.contents,
+        })
     }
 }

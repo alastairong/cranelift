@@ -8,7 +8,8 @@
 
 use crate::state::{FuncTranslationState, ModuleTranslationState};
 use crate::translation_utils::{
-    FuncIndex, Global, GlobalIndex, Memory, MemoryIndex, SignatureIndex, Table, TableIndex,
+    FuncIndex, Global, GlobalIndex, Memory, MemoryIndex, PassiveDataIndex, PassiveElemIndex,
+    SignatureIndex, Table, TableIndex,
 };
 use core::convert::From;
 use cranelift_codegen::cursor::FuncCursor;
@@ -36,6 +37,9 @@ pub enum GlobalVariable {
         /// The global variable's type.
         ty: ir::Type,
     },
+
+    /// This is a global variable that needs to be handled by the environment.
+    Custom,
 }
 
 /// A WebAssembly translation error.
@@ -51,7 +55,7 @@ pub enum WasmError {
     #[error("Invalid input WebAssembly code at offset {offset}: {message}")]
     InvalidWebAssembly {
         /// A string describing the validation error.
-        message: &'static str,
+        message: std::string::String,
         /// The bytecode offset where the error occurred.
         offset: usize,
     },
@@ -86,8 +90,10 @@ macro_rules! wasm_unsupported {
 impl From<BinaryReaderError> for WasmError {
     /// Convert from a `BinaryReaderError` to a `WasmError`.
     fn from(e: BinaryReaderError) -> Self {
-        let BinaryReaderError { message, offset } = e;
-        Self::InvalidWebAssembly { message, offset }
+        Self::InvalidWebAssembly {
+            message: e.message().into(),
+            offset: e.offset(),
+        }
     }
 }
 
@@ -138,6 +144,18 @@ pub trait TargetEnvironment {
 /// IR. The function environment provides information about the WebAssembly module as well as the
 /// runtime environment.
 pub trait FuncEnvironment: TargetEnvironment {
+    /// Is the given parameter of the given function a wasm-level parameter, as opposed to a hidden
+    /// parameter added for use by the implementation?
+    fn is_wasm_parameter(&self, signature: &ir::Signature, index: usize) -> bool {
+        signature.params[index].purpose == ir::ArgumentPurpose::Normal
+    }
+
+    /// Is the given return of the given function a wasm-level parameter, as
+    /// opposed to a hidden parameter added for use by the implementation?
+    fn is_wasm_return(&self, signature: &ir::Signature, index: usize) -> bool {
+        signature.returns[index].purpose == ir::ArgumentPurpose::Normal
+    }
+
     /// Should the code be structured to use a single `fallthrough_return` instruction at the end
     /// of the function body, rather than `return` instructions as needed? This is used by VMs
     /// to append custom epilogues.
@@ -302,6 +320,7 @@ pub trait FuncEnvironment: TargetEnvironment {
     /// The `index` provided identifies the linear memory to query, and `heap` is the heap reference
     /// returned by `make_heap` for the same index. `seg_index` is the index of the segment to copy
     /// from.
+    #[allow(clippy::too_many_arguments)]
     fn translate_memory_init(
         &mut self,
         pos: FuncCursor,
@@ -324,7 +343,34 @@ pub trait FuncEnvironment: TargetEnvironment {
         table: ir::Table,
     ) -> WasmResult<ir::Value>;
 
+    /// Translate a `table.grow` WebAssembly instruction.
+    fn translate_table_grow(
+        &mut self,
+        pos: FuncCursor,
+        table_index: u32,
+        delta: ir::Value,
+        init_value: ir::Value,
+    ) -> WasmResult<ir::Value>;
+
+    /// Translate a `table.get` WebAssembly instruction.
+    fn translate_table_get(
+        &mut self,
+        pos: FuncCursor,
+        table_index: u32,
+        index: ir::Value,
+    ) -> WasmResult<ir::Value>;
+
+    /// Translate a `table.set` WebAssembly instruction.
+    fn translate_table_set(
+        &mut self,
+        pos: FuncCursor,
+        table_index: u32,
+        value: ir::Value,
+        index: ir::Value,
+    ) -> WasmResult<()>;
+
     /// Translate a `table.copy` WebAssembly instruction.
+    #[allow(clippy::too_many_arguments)]
     fn translate_table_copy(
         &mut self,
         pos: FuncCursor,
@@ -337,7 +383,18 @@ pub trait FuncEnvironment: TargetEnvironment {
         len: ir::Value,
     ) -> WasmResult<()>;
 
+    /// Translate a `table.fill` WebAssembly instruction.
+    fn translate_table_fill(
+        &mut self,
+        pos: FuncCursor,
+        table_index: u32,
+        dst: ir::Value,
+        val: ir::Value,
+        len: ir::Value,
+    ) -> WasmResult<()>;
+
     /// Translate a `table.init` WebAssembly instruction.
+    #[allow(clippy::too_many_arguments)]
     fn translate_table_init(
         &mut self,
         pos: FuncCursor,
@@ -351,6 +408,26 @@ pub trait FuncEnvironment: TargetEnvironment {
 
     /// Translate a `elem.drop` WebAssembly instruction.
     fn translate_elem_drop(&mut self, pos: FuncCursor, seg_index: u32) -> WasmResult<()>;
+
+    /// Translate a `ref.func` WebAssembly instruction.
+    fn translate_ref_func(&mut self, pos: FuncCursor, func_index: u32) -> WasmResult<ir::Value>;
+
+    /// Translate a `global.get` WebAssembly instruction at `pos` for a global
+    /// that is custom.
+    fn translate_custom_global_get(
+        &mut self,
+        pos: FuncCursor,
+        global_index: GlobalIndex,
+    ) -> WasmResult<ir::Value>;
+
+    /// Translate a `global.set` WebAssembly instruction at `pos` for a global
+    /// that is custom.
+    fn translate_custom_global_set(
+        &mut self,
+        pos: FuncCursor,
+        global_index: GlobalIndex,
+        val: ir::Value,
+    ) -> WasmResult<()>;
 
     /// Emit code at the beginning of every wasm loop.
     ///
@@ -524,6 +601,29 @@ pub trait ModuleEnvironment<'data>: TargetEnvironment {
         base: Option<GlobalIndex>,
         offset: usize,
         elements: Box<[FuncIndex]>,
+    ) -> WasmResult<()>;
+
+    /// Declare a passive element segment.
+    fn declare_passive_element(
+        &mut self,
+        index: PassiveElemIndex,
+        elements: Box<[FuncIndex]>,
+    ) -> WasmResult<()>;
+
+    /// Provides the number of passive data segments up front.
+    ///
+    /// By default this does nothing, but implementations may use this to
+    /// pre-allocate memory if desired.
+    fn reserve_passive_data(&mut self, count: u32) -> WasmResult<()> {
+        let _ = count;
+        Ok(())
+    }
+
+    /// Declare a passive data segment.
+    fn declare_passive_data(
+        &mut self,
+        data_index: PassiveDataIndex,
+        data: &'data [u8],
     ) -> WasmResult<()>;
 
     /// Provides the contents of a function body.
