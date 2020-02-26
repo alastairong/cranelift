@@ -24,7 +24,7 @@ cranelift-entity = { path = "cranelift-entity", version = "0.59.0" }
 cranelift-reader = { path = "cranelift-reader", version = "0.59.0" }
 wasmer-clif-fork-frontend = { path = "cranelift-frontend", version = "0.59.0" }
 cranelift-serde = { path = "cranelift-serde", version = "0.59.0", optional = true }
-cranelift-wasm = { path = "cranelift-wasm", version = "0.59.0", optional = true }
+wasmer-clif-fork-wasm = { path = "cranelift-wasm", version = "0.59.0", optional = true }
 cranelift-native = { path = "cranelift-native", version = "0.59.0" }
 cranelift-filetests = { path = "cranelift-filetests", version = "0.59.0" }
 cranelift-module = { path = "cranelift-module", version = "0.59.0" }
