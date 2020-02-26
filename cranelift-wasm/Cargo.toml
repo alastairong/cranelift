@@ -1,32 +1,29 @@
 [package]
 name = "wasmer-clif-fork-wasm"
-version = "0.52.0"
+version = "0.59.0"
 authors = ["Forked from work done by The Cranelift Project Developers"]
 description = "Translator from WebAssembly to Cranelift IR"
 repository = "https://github.com/wasmerio/cranelift/tree/wasmer"
 
 [dependencies]
-wasmparser = { version = "0.45.0", default-features = false }
-cranelift-codegen = { path = "../cranelift-codegen", version = "0.52.0", default-features = false }
-cranelift-entity = { path = "../cranelift-entity", version = "0.52.0" }
-wasmer-clif-fork-frontend = { path = "../cranelift-frontend", version = "0.52.0", default-features = false }
+wasmparser = { version = "0.51", default-features = false }
+cranelift-codegen = { path = "../cranelift-codegen", version = "0.59.0", default-features = false }
+cranelift-entity = { path = "../cranelift-entity", version = "0.59.0" }
+wasmer-clif-fork-frontend = { path = "../cranelift-frontend", version = "0.59.0", default-features = false }
 hashbrown = { version = "0.6", optional = true }
 log = { version = "0.4.6", default-features = false }
 serde = { version = "1.0.94", features = ["derive"], optional = true }
 thiserror = "1.0.4"
 
 [dev-dependencies]
-wabt = "0.9.1"
-target-lexicon = "0.9"
+wat = "1.0.9"
+target-lexicon = "0.10"
 
 [features]
-default = ["std", "basic-blocks"]
+default = ["std"]
 std = ["cranelift-codegen/std", "wasmer-clif-fork-frontend/std"]
 core = ["hashbrown", "cranelift-codegen/core", "wasmer-clif-fork-frontend/core"]
 enable-serde = ["serde"]
-
-# Temporary feature that enforces basic block semantics.
-basic-blocks = ["cranelift-codegen/basic-blocks", "cranelift-frontend/basic-blocks"]
 
 [badges]
 maintenance = { status = "experimental" }

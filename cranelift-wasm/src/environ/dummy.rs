@@ -11,8 +11,8 @@ use crate::environ::{
 use crate::func_translator::FuncTranslator;
 use crate::state::ModuleTranslationState;
 use crate::translation_utils::{
-    DefinedFuncIndex, FuncIndex, Global, GlobalIndex, Memory, MemoryIndex, SignatureIndex, Table,
-    TableIndex,
+    DefinedFuncIndex, FuncIndex, Global, GlobalIndex, Memory, MemoryIndex, PassiveDataIndex,
+    PassiveElemIndex, SignatureIndex, Table, TableIndex,
 };
 use core::convert::TryFrom;
 use cranelift_codegen::cursor::FuncCursor;
@@ -426,6 +426,35 @@ impl<'dummy_environment> FuncEnvironment for DummyFuncEnvironment<'dummy_environ
         Ok(pos.ins().iconst(I32, -1))
     }
 
+    fn translate_table_grow(
+        &mut self,
+        mut pos: FuncCursor,
+        _table_index: u32,
+        _delta: ir::Value,
+        _init_value: ir::Value,
+    ) -> WasmResult<ir::Value> {
+        Ok(pos.ins().iconst(I32, -1))
+    }
+
+    fn translate_table_get(
+        &mut self,
+        mut pos: FuncCursor,
+        _table_index: u32,
+        _index: ir::Value,
+    ) -> WasmResult<ir::Value> {
+        Ok(pos.ins().null(self.reference_type()))
+    }
+
+    fn translate_table_set(
+        &mut self,
+        _pos: FuncCursor,
+        _table_index: u32,
+        _value: ir::Value,
+        _index: ir::Value,
+    ) -> WasmResult<()> {
+        Ok(())
+    }
+
     fn translate_table_copy(
         &mut self,
         _pos: FuncCursor,
@@ -435,6 +464,17 @@ impl<'dummy_environment> FuncEnvironment for DummyFuncEnvironment<'dummy_environ
         _src_table: ir::Table,
         _dst: ir::Value,
         _src: ir::Value,
+        _len: ir::Value,
+    ) -> WasmResult<()> {
+        Ok(())
+    }
+
+    fn translate_table_fill(
+        &mut self,
+        _pos: FuncCursor,
+        _table_index: u32,
+        _dst: ir::Value,
+        _val: ir::Value,
         _len: ir::Value,
     ) -> WasmResult<()> {
         Ok(())
@@ -454,6 +494,31 @@ impl<'dummy_environment> FuncEnvironment for DummyFuncEnvironment<'dummy_environ
     }
 
     fn translate_elem_drop(&mut self, _pos: FuncCursor, _seg_index: u32) -> WasmResult<()> {
+        Ok(())
+    }
+
+    fn translate_ref_func(
+        &mut self,
+        mut pos: FuncCursor,
+        _func_index: u32,
+    ) -> WasmResult<ir::Value> {
+        Ok(pos.ins().null(self.reference_type()))
+    }
+
+    fn translate_custom_global_get(
+        &mut self,
+        mut pos: FuncCursor,
+        _global_index: GlobalIndex,
+    ) -> WasmResult<ir::Value> {
+        Ok(pos.ins().iconst(I32, -1))
+    }
+
+    fn translate_custom_global_set(
+        &mut self,
+        _pos: FuncCursor,
+        _global_index: GlobalIndex,
+        _val: ir::Value,
+    ) -> WasmResult<()> {
         Ok(())
     }
 }
@@ -537,6 +602,22 @@ impl<'data> ModuleEnvironment<'data> for DummyEnvironment {
         _elements: Box<[FuncIndex]>,
     ) -> WasmResult<()> {
         // We do nothing
+        Ok(())
+    }
+
+    fn declare_passive_element(
+        &mut self,
+        _elem_index: PassiveElemIndex,
+        _segments: Box<[FuncIndex]>,
+    ) -> WasmResult<()> {
+        Ok(())
+    }
+
+    fn declare_passive_data(
+        &mut self,
+        _elem_index: PassiveDataIndex,
+        _segments: &'data [u8],
+    ) -> WasmResult<()> {
         Ok(())
     }
 

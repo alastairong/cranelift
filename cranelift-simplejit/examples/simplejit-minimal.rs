@@ -30,11 +30,11 @@ fn main() {
     {
         let mut bcx: FunctionBuilder =
             FunctionBuilder::new(&mut ctx.func, &mut func_ctx, &mut position);
-        let ebb = bcx.create_ebb();
+        let block = bcx.create_block();
 
-        bcx.switch_to_block(ebb);
-        bcx.append_ebb_params_for_function_params(ebb);
-        let param = bcx.ebb_params(ebb)[0];
+        bcx.switch_to_block(block);
+        bcx.append_block_params_for_function_params(block);
+        let param = bcx.block_params(block)[0];
         let cst = bcx.ins().iconst(types::I32, 37);
         let add = bcx.ins().iadd(cst, param);
         bcx.ins().return_(&[add]);
@@ -49,9 +49,9 @@ fn main() {
     {
         let mut bcx: FunctionBuilder =
             FunctionBuilder::new(&mut ctx.func, &mut func_ctx, &mut position);
-        let ebb = bcx.create_ebb();
+        let block = bcx.create_block();
 
-        bcx.switch_to_block(ebb);
+        bcx.switch_to_block(block);
         let local_func = module.declare_func_in_func(func_a, &mut bcx.func);
         let arg = bcx.ins().iconst(types::I32, 5);
         let call = bcx.ins().call(local_func, &[arg]);

@@ -379,12 +379,13 @@ mod tests {
             f.to_string(),
             "[shared]\n\
              opt_level = \"none\"\n\
+             tls_model = \"none\"\n\
              libcall_call_conv = \"isa_default\"\n\
              baldrdash_prologue_words = 0\n\
              probestack_size_log2 = 12\n\
              enable_verifier = true\n\
              is_pic = false\n\
-             colocated_libcalls = false\n\
+             use_colocated_libcalls = false\n\
              avoid_div_traps = false\n\
              enable_float = true\n\
              enable_nan_canonicalization = false\n\
@@ -393,10 +394,10 @@ mod tests {
              enable_simd = false\n\
              enable_atomics = true\n\
              enable_safepoints = false\n\
-             allones_funcaddrs = false\n\
-             probestack_enabled = true\n\
+             emit_all_ones_funcaddrs = false\n\
+             enable_probestack = true\n\
              probestack_func_adjusts_sp = false\n\
-             jump_tables_enabled = true\n"
+             enable_jump_tables = true\n"
         );
         assert_eq!(f.opt_level(), super::OptLevel::None);
         assert_eq!(f.enable_simd(), false);

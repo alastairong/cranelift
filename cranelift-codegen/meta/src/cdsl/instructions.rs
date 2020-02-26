@@ -112,7 +112,7 @@ pub(crate) struct InstructionContent {
     /// Indices in operands_out of output operands that are values.
     pub value_results: Vec<usize>,
 
-    /// True for instructions that terminate the EBB.
+    /// True for instructions that terminate the block.
     pub is_terminator: bool,
     /// True for all branch or jump instructions.
     pub is_branch: bool,
@@ -340,7 +340,7 @@ impl InstructionBuilder {
         let polymorphic_info =
             verify_polymorphic(&operands_in, &operands_out, &self.format, &value_opnums);
 
-        // Infer from output operands whether an instruciton clobbers CPU flags or not.
+        // Infer from output operands whether an instruction clobbers CPU flags or not.
         let writes_cpu_flags = operands_out.iter().any(|op| op.is_cpu_flags());
 
         let camel_name = camel_case(&self.name);
@@ -1346,7 +1346,7 @@ mod test {
         let type1 = TypeSetBuilder::new().ints(8..64).build();
         let in1 = OperandKindFields::TypeVar(TypeVar::new("a", "...", type1));
         let inst = build_fake_instruction(vec![in1], vec![]);
-        inst.bind(LaneType::IntType(I32));
+        inst.bind(LaneType::Int(I32));
     }
 
     #[test]
@@ -1360,7 +1360,7 @@ mod test {
     #[should_panic]
     fn ensure_instructions_fail_to_bind() {
         let inst = build_fake_instruction(vec![], vec![]);
-        inst.bind(BindParameter::Lane(LaneType::IntType(I32)));
+        inst.bind(BindParameter::Lane(LaneType::Int(I32)));
         // Trying to bind to an instruction with no inputs should fail.
     }
 
@@ -1370,8 +1370,7 @@ mod test {
         let type1 = TypeSetBuilder::new().ints(8..64).build();
         let in1 = OperandKindFields::TypeVar(TypeVar::new("a", "...", type1));
         let inst = build_fake_instruction(vec![in1], vec![]);
-        inst.bind(LaneType::IntType(I32))
-            .bind(LaneType::IntType(I64));
+        inst.bind(LaneType::Int(I32)).bind(LaneType::Int(I64));
     }
 
     #[test]
