@@ -195,7 +195,7 @@ use hashbrown::{hash_map, HashMap};
 use std::collections::{hash_map, HashMap};
 
 pub use crate::frontend::{FunctionBuilder, FunctionBuilderContext, Position};
-pub use crate::ssa::Block;
+pub use crate::ssa::SSABlock;
 pub use crate::switch::Switch;
 pub use crate::variable::Variable;
 
