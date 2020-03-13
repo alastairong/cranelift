@@ -108,7 +108,7 @@ impl FuncTranslator {
         // function and its return values.
         let exit_block = builder.create_block();
         builder.append_block_params_for_function_returns(exit_block);
-        self.state.initialize(&builder.func.signature, exit_block);
+        self.state.initialize(exit_block, builder.func.signature.returns.len());
 
         parse_local_decls(&mut reader, &mut builder, num_params, environ)?;
         parse_function_body(

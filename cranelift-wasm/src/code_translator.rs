@@ -41,7 +41,7 @@ use wasmer_clif_fork_frontend::{FunctionBuilder, Variable};
 use std::vec::Vec;
 use wasmparser::{MemoryImmediate, Operator};
 
-// Clippy warns about "flags: _" but its important to document that the flags field is ignored
+// Clippy warns about "flags: _" but it's important to document that the flags field is ignored
 #[cfg_attr(
     feature = "cargo-clippy",
     allow(clippy::unneeded_field_pattern, clippy::cognitive_complexity)
@@ -491,22 +491,14 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
             });
             bitcast_arguments(args, &types, builder);
 
-            let call = environ.translate_call(
+            let call_results = environ.translate_call(
                 builder.cursor(),
                 FuncIndex::from_u32(*function_index),
                 fref,
                 args,
             )?;
-            let inst_results = builder.inst_results(call);
-            debug_assert_eq!(
-                inst_results.len(),
-                builder.func.dfg.signatures[builder.func.dfg.ext_funcs[fref].signature]
-                    .returns
-                    .len(),
-                "translate_call results should match the call signature"
-            );
             state.popn(num_args);
-            state.pushn(inst_results);
+            state.pushn(call_results.as_slice());
         }
         Operator::CallIndirect { index, table_index } => {
             // `index` is the index of the function's signature and `table_index` is the index of
@@ -523,7 +515,7 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
             });
             bitcast_arguments(args, &types, builder);
 
-            let call = environ.translate_call_indirect(
+            let call_results = environ.translate_call_indirect(
                 builder.cursor(),
                 TableIndex::from_u32(*table_index),
                 table,
@@ -532,14 +524,8 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
                 callee,
                 state.peekn(num_args),
             )?;
-            let inst_results = builder.inst_results(call);
-            debug_assert_eq!(
-                inst_results.len(),
-                builder.func.dfg.signatures[sigref].returns.len(),
-                "translate_call_indirect results should match the call signature"
-            );
             state.popn(num_args);
-            state.pushn(inst_results);
+            state.pushn(call_results.as_slice());
         }
         /******************************* Memory management ***********************************
          * Memory management is handled by environment. It is usually translated into calls to

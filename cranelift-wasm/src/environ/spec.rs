@@ -13,11 +13,12 @@ use crate::translation_utils::{
 };
 use core::convert::From;
 use cranelift_codegen::cursor::FuncCursor;
+use cranelift_codegen::ir;
 use cranelift_codegen::ir::immediates::Offset32;
-use cranelift_codegen::ir::{self, InstBuilder};
 use cranelift_codegen::isa::TargetFrontendConfig;
 use wasmer_clif_fork_frontend::FunctionBuilder;
 use std::boxed::Box;
+use std::vec::Vec;
 use thiserror::Error;
 use wasmparser::BinaryReaderError;
 use wasmparser::Operator;
@@ -239,7 +240,7 @@ pub trait FuncEnvironment: TargetEnvironment {
         sig_ref: ir::SigRef,
         callee: ir::Value,
         call_args: &[ir::Value],
-    ) -> WasmResult<ir::Inst>;
+    ) -> WasmResult<Vec<ir::Value>>;
 
     /// Translate a `call` WebAssembly instruction at `pos`.
     ///
@@ -250,13 +251,11 @@ pub trait FuncEnvironment: TargetEnvironment {
     /// Return the call instruction whose results are the WebAssembly return values.
     fn translate_call(
         &mut self,
-        mut pos: FuncCursor,
-        _callee_index: FuncIndex,
+        pos: FuncCursor,
+        callee_index: FuncIndex,
         callee: ir::FuncRef,
         call_args: &[ir::Value],
-    ) -> WasmResult<ir::Inst> {
-        Ok(pos.ins().call(callee, call_args))
-    }
+    ) -> WasmResult<Vec<ir::Value>>;
 
     /// Translate a `memory.grow` WebAssembly instruction.
     ///

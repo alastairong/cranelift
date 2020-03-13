@@ -254,15 +254,12 @@ impl FuncTranslationState {
     ///
     /// This resets the state to containing only a single block representing the whole function.
     /// The exit block is the last block in the function which will contain the return instruction.
-    pub fn initialize(&mut self, sig: &ir::Signature, exit_block: Block) {
+    pub fn initialize(&mut self, exit_block: Block, returns: usize) {
         self.clear();
         self.push_block(
             exit_block,
             0,
-            sig.returns
-                .iter()
-                .filter(|arg| arg.purpose == ir::ArgumentPurpose::Normal)
-                .count(),
+            returns
         );
     }
 

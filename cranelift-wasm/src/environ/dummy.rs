@@ -302,7 +302,7 @@ impl<'dummy_environment> FuncEnvironment for DummyFuncEnvironment<'dummy_environ
         sig_ref: ir::SigRef,
         callee: ir::Value,
         call_args: &[ir::Value],
-    ) -> WasmResult<ir::Inst> {
+    ) -> WasmResult<Vec<ir::Value>> {
         // Pass the current function's vmctx parameter on to the callee.
         let vmctx = pos
             .func
@@ -329,10 +329,11 @@ impl<'dummy_environment> FuncEnvironment for DummyFuncEnvironment<'dummy_environ
         args.extend(call_args.iter().cloned(), &mut pos.func.dfg.value_lists);
         args.push(vmctx, &mut pos.func.dfg.value_lists);
 
-        Ok(pos
+        let call = pos
             .ins()
             .CallIndirect(ir::Opcode::CallIndirect, INVALID, sig_ref, args)
-            .0)
+            .0;
+        Ok(pos.func.dfg.inst_results(call).to_vec())
     }
 
     fn translate_call(
@@ -341,7 +342,7 @@ impl<'dummy_environment> FuncEnvironment for DummyFuncEnvironment<'dummy_environ
         _callee_index: FuncIndex,
         callee: ir::FuncRef,
         call_args: &[ir::Value],
-    ) -> WasmResult<ir::Inst> {
+    ) -> WasmResult<Vec<ir::Value>> {
         // Pass the current function's vmctx parameter on to the callee.
         let vmctx = pos
             .func
@@ -354,7 +355,8 @@ impl<'dummy_environment> FuncEnvironment for DummyFuncEnvironment<'dummy_environ
         args.extend(call_args.iter().cloned(), &mut pos.func.dfg.value_lists);
         args.push(vmctx, &mut pos.func.dfg.value_lists);
 
-        Ok(pos.ins().Call(ir::Opcode::Call, INVALID, callee, args).0)
+        let call = pos.ins().Call(ir::Opcode::Call, INVALID, callee, args).0;
+        Ok(pos.func.dfg.inst_results(call).to_vec())
     }
 
     fn translate_memory_grow(
