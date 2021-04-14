@@ -37,7 +37,7 @@ use cranelift_codegen::ir::{
     self, ConstantData, InstBuilder, JumpTableData, MemFlags, Value, ValueLabel,
 };
 use cranelift_codegen::packed_option::ReservedValue;
-use wasmer_clif_fork_frontend::{FunctionBuilder, Variable};
+use cranelift_frontend::{FunctionBuilder, Variable};
 use std::vec::Vec;
 use wasmparser::{MemoryImmediate, Operator};
 

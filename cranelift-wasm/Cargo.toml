@@ -1,6 +1,6 @@
 [package]
-name = "wasmer-clif-fork-wasm"
-version = "0.59.0"
+name = "cranelift-wasm"
+version = "0.70.0"
 authors = ["Forked from work done by The Cranelift Project Developers"]
 license = "Apache-2.0 WITH LLVM-exception"
 description = "Translator from WebAssembly to Cranelift IR"
@@ -9,9 +9,9 @@ edition = "2018"
 
 [dependencies]
 wasmparser = { version = "0.51", default-features = false }
-cranelift-codegen = { path = "../cranelift-codegen", version = "0.59.0", default-features = false }
-cranelift-entity = { path = "../cranelift-entity", version = "0.59.0" }
-wasmer-clif-fork-frontend = { path = "../cranelift-frontend", version = "0.59.0", default-features = false }
+cranelift-codegen = { path = "../cranelift-codegen", version = "0.70.0", default-features = false }
+cranelift-entity = { path = "../cranelift-entity", version = "0.70.0" }
+cranelift-frontend = { path = "../cranelift-frontend", version = "0.70.0", default-features = false }
 hashbrown = { version = "0.6", optional = true }
 log = { version = "0.4.6", default-features = false }
 serde = { version = "1.0.94", features = ["derive"], optional = true }
@@ -23,8 +23,8 @@ target-lexicon = "0.10"
 
 [features]
 default = ["std"]
-std = ["cranelift-codegen/std", "wasmer-clif-fork-frontend/std"]
-core = ["hashbrown", "cranelift-codegen/core", "wasmer-clif-fork-frontend/core"]
+std = ["cranelift-codegen/std", "cranelift-frontend/std"]
+core = ["hashbrown", "cranelift-codegen/core", "cranelift-frontend/core"]
 enable-serde = ["serde"]
 
 [badges]

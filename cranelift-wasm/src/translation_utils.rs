@@ -6,7 +6,7 @@ use core::u32;
 use cranelift_codegen::entity::entity_impl;
 use cranelift_codegen::ir;
 use cranelift_codegen::ir::immediates::V128Imm;
-use wasmer_clif_fork_frontend::FunctionBuilder;
+use cranelift_frontend::FunctionBuilder;
 #[cfg(feature = "enable-serde")]
 use serde::{Deserialize, Serialize};
 use wasmparser;
