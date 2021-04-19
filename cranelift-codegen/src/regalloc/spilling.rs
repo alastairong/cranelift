@@ -199,7 +199,7 @@ impl<'a> Context<'a> {
         self.pressure.reset();
         self.take_live_regs(liveins);
 
-        // An block can have an arbitrary (up to 2^16...) number of parameters, so they are not
+        // A block can have an arbitrary (up to 2^16...) number of parameters, so they are not
         // guaranteed to fit in registers.
         for lv in params {
             if let Affinity::Reg(rci) = lv.affinity {
@@ -268,10 +268,7 @@ impl<'a> Context<'a> {
         // This means that we don't currently take advantage of callee-saved registers.
         // TODO: Be more sophisticated.
         let opcode = self.cur.func.dfg[inst].opcode();
-        if call_sig.is_some()
-            || opcode == crate::ir::Opcode::X86ElfTlsGetAddr
-            || opcode == crate::ir::Opcode::X86MachoTlsGetAddr
-        {
+        if call_sig.is_some() || opcode.clobbers_all_regs() {
             for lv in throughs {
                 if lv.affinity.is_reg() && !self.spills.contains(&lv.value) {
                     self.spill_reg(lv.value);

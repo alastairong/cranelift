@@ -4,7 +4,7 @@
 //! Sometimes, it is necessary to move register values to a different register in order to satisfy
 //! instruction constraints.
 //!
-//! These register diversions are local to an block. No values can be diverted when entering a new
+//! These register diversions are local to a block. No values can be diverted when entering a new
 //! block.
 
 use crate::fx::FxHashMap;
@@ -15,6 +15,9 @@ use crate::isa::{RegInfo, RegUnit};
 use core::fmt;
 use cranelift_entity::{SparseMap, SparseMapValue};
 
+#[cfg(feature = "enable-serde")]
+use serde::{Deserialize, Serialize};
+
 /// A diversion of a value from its original location to a new register or stack location.
 ///
 /// In IR, a diversion is represented by a `regmove` instruction, possibly a chain of them for the
@@ -23,6 +26,7 @@ use cranelift_entity::{SparseMap, SparseMapValue};
 /// When tracking diversions, the `from` field is the original assigned value location, and `to` is
 /// the current one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct Diversion {
     /// The original value location.
     pub from: ValueLoc,
@@ -38,20 +42,23 @@ impl Diversion {
     }
 }
 
-/// Keep track of diversions in an block.
+/// Keep track of diversions in a block.
 #[derive(Clone)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct RegDiversions {
     current: FxHashMap<Value, Diversion>,
 }
 
 /// Keep track of diversions at the entry of block.
 #[derive(Clone)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 struct EntryRegDiversionsValue {
     key: Block,
     divert: RegDiversions,
 }
 
 /// Map block to their matching RegDiversions at basic blocks entry.
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct EntryRegDiversions {
     map: SparseMap<Block, EntryRegDiversionsValue>,
 }

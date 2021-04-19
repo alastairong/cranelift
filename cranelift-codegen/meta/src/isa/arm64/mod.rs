@@ -8,7 +8,10 @@ use crate::cdsl::settings::{SettingGroup, SettingGroupBuilder};
 use crate::shared::Definitions as SharedDefinitions;
 
 fn define_settings(_shared: &SettingGroup) -> SettingGroup {
-    let setting = SettingGroupBuilder::new("arm64");
+    let mut setting = SettingGroupBuilder::new("arm64");
+    let has_lse = setting.add_bool("has_lse", "Large System Extensions", false);
+
+    setting.add_predicate("use_lse", predicate!(has_lse));
     setting.build()
 }
 
@@ -54,7 +57,9 @@ pub(crate) fn define(shared_defs: &mut SharedDefinitions) -> TargetIsa {
     let mut a64 = CpuMode::new("A64");
 
     // TODO refine these.
+    let expand_flags = shared_defs.transform_groups.by_name("expand_flags");
     let narrow_flags = shared_defs.transform_groups.by_name("narrow_flags");
+    a64.legalize_monomorphic(expand_flags);
     a64.legalize_default(narrow_flags);
 
     let cpu_modes = vec![a64];

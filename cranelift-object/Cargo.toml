@@ -17,7 +17,7 @@ goblin = "0.1.0"
 
 [dependencies.cranelift-codegen]
 path = "../cranelift-codegen"
-version = "0.70.0"
+version = "0.72.0"
 default-features = false
 features = ["std"]
 

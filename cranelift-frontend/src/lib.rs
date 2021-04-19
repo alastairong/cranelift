@@ -73,7 +73,7 @@
 //! use cranelift_codegen::isa::CallConv;
 //! use cranelift_codegen::settings;
 //! use cranelift_codegen::verifier::verify_function;
-//! use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Position, Variable};
+//! use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 //!
 //! let mut sig = Signature::new(CallConv::SystemV);
 //! sig.returns.push(AbiParam::new(I32));
@@ -172,9 +172,8 @@
         clippy::float_arithmetic,
         clippy::mut_mut,
         clippy::nonminimal_bool,
-        clippy::option_map_unwrap_or,
-        clippy::option_map_unwrap_or_else,
-        clippy::print_stdout,
+        clippy::map_unwrap_or,
+        clippy::clippy::print_stdout,
         clippy::unicode_not_nfc,
         clippy::use_self
     )
@@ -194,8 +193,7 @@ use hashbrown::{hash_map, HashMap};
 #[cfg(feature = "std")]
 use std::collections::{hash_map, HashMap};
 
-pub use crate::frontend::{FunctionBuilder, FunctionBuilderContext, Position};
-pub use crate::ssa::SSABlock;
+pub use crate::frontend::{FunctionBuilder, FunctionBuilderContext};
 pub use crate::switch::Switch;
 pub use crate::variable::Variable;
 

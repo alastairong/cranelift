@@ -62,7 +62,7 @@ impl InstructionGroup {
         self.instructions
             .iter()
             .find(|inst| inst.name == name)
-            .unwrap_or_else(|| panic!("unexisting instruction with name {}", name))
+            .unwrap_or_else(|| panic!("instruction with name '{}' does not exist", name))
     }
 }
 
@@ -134,6 +134,8 @@ pub(crate) struct InstructionContent {
     pub other_side_effects: bool,
     /// Does this instruction write to CPU flags?
     pub writes_cpu_flags: bool,
+    /// Should this opcode be considered to clobber all live registers, during regalloc?
+    pub clobbers_all_regs: bool,
 }
 
 impl InstructionContent {
@@ -214,6 +216,7 @@ pub(crate) struct InstructionBuilder {
     can_store: bool,
     can_trap: bool,
     other_side_effects: bool,
+    clobbers_all_regs: bool,
 }
 
 impl InstructionBuilder {
@@ -236,6 +239,7 @@ impl InstructionBuilder {
             can_store: false,
             can_trap: false,
             other_side_effects: false,
+            clobbers_all_regs: false,
         }
     }
 
@@ -313,6 +317,11 @@ impl InstructionBuilder {
         self
     }
 
+    pub fn clobbers_all_regs(mut self, val: bool) -> Self {
+        self.clobbers_all_regs = val;
+        self
+    }
+
     fn build(self, opcode_number: OpcodeNumber) -> Instruction {
         let operands_in = self.operands_in.unwrap_or_else(Vec::new);
         let operands_out = self.operands_out.unwrap_or_else(Vec::new);
@@ -369,6 +378,7 @@ impl InstructionBuilder {
             can_trap: self.can_trap,
             other_side_effects: self.other_side_effects,
             writes_cpu_flags,
+            clobbers_all_regs: self.clobbers_all_regs,
         })
     }
 }
@@ -384,7 +394,7 @@ impl ValueTypeOrAny {
     pub fn expect(self, msg: &str) -> ValueType {
         match self {
             ValueTypeOrAny::ValueType(vt) => vt,
-            ValueTypeOrAny::Any => panic!(format!("Unexpected Any: {}", msg)),
+            ValueTypeOrAny::Any => panic!("Unexpected Any: {}", msg),
         }
     }
 }
@@ -588,7 +598,7 @@ fn verify_format(inst_name: &str, operands_in: &[Operand], format: &InstructionF
 
     assert_eq!(
         num_values, format.num_value_operands,
-        "inst {} doesnt' have as many value input operand as its format {} declares; you may need \
+        "inst {} doesn't have as many value input operands as its format {} declares; you may need \
          to use a different format.",
         inst_name, format.name
     );
@@ -655,7 +665,7 @@ fn verify_polymorphic(
     if operands_out.is_empty() {
         // No result means no other possible type variable, so it's a type inference failure.
         match maybe_error_message {
-            Some(msg) => panic!(msg),
+            Some(msg) => panic!("{}", msg),
             None => panic!("typevar_operand must be a free type variable"),
         }
     }

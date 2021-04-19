@@ -19,12 +19,16 @@ use core::slice::Iter;
 use core::str::{from_utf8, FromStr};
 use cranelift_entity::EntityRef;
 
+#[cfg(feature = "enable-serde")]
+use serde::{Deserialize, Serialize};
+
 /// This type describes the actual constant data. Note that the bytes stored in this structure are
 /// expected to be in little-endian order; this is due to ease-of-use when interacting with
 /// WebAssembly values, which are [little-endian by design].
 ///
 /// [little-endian by design]: https://github.com/WebAssembly/design/blob/master/Portability.md
 #[derive(Clone, Hash, Eq, PartialEq, Debug, Default)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct ConstantData(Vec<u8>);
 
 impl FromIterator<u8> for ConstantData {
@@ -56,6 +60,16 @@ impl ConstantData {
     /// Return the number of bytes in the constant.
     pub fn len(&self) -> usize {
         self.0.len()
+    }
+
+    /// Check if the constant contains any bytes.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Return the data as a slice.
+    pub fn as_slice(&self) -> &[u8] {
+        self.0.as_slice()
     }
 
     /// Convert the data to a vector.
@@ -92,23 +106,19 @@ impl ConstantData {
 impl fmt::Display for ConstantData {
     /// Print the constant data in hexadecimal format, e.g. 0x000102030405060708090a0b0c0d0e0f.
     /// This function will flip the stored order of bytes--little-endian--to the more readable
-    /// big-endian ordering. Any zero bytes in high-order bytes will be discarded in the formatted
-    /// string.
+    /// big-endian ordering.
     ///
     /// ```
     /// use cranelift_codegen::ir::ConstantData;
     /// let data = ConstantData::from([3, 2, 1, 0, 0].as_ref()); // note the little-endian order
-    /// assert_eq!(data.to_string(), "0x010203");
+    /// assert_eq!(data.to_string(), "0x0000010203");
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "0x")?;
-        let mut bytes_written = 0;
-        for b in self.0.iter().rev().skip_while(|&&b| b == 0) {
-            write!(f, "{:02x}", b)?;
-            bytes_written += 1;
-        }
-        if bytes_written < 1 {
-            write!(f, "00")?;
+        if !self.is_empty() {
+            write!(f, "0x")?;
+            for b in self.0.iter().rev() {
+                write!(f, "{:02x}", b)?;
+            }
         }
         Ok(())
     }
@@ -165,8 +175,9 @@ pub type ConstantOffset = u32;
 /// function body); because the function is not yet compiled when constants are inserted,
 /// [`set_offset`](crate::ir::ConstantPool::set_offset) must be called once a constant's offset
 /// from the beginning of the function is known (see
-/// [`relaxation.rs`](crate::binemit::relaxation)).
+/// `relaxation` in `relaxation.rs`).
 #[derive(Clone)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct ConstantPoolEntry {
     data: ConstantData,
     offset: Option<ConstantOffset>,
@@ -191,6 +202,7 @@ impl ConstantPoolEntry {
 /// Maintains the mapping between a constant handle (i.e.  [`Constant`](crate::ir::Constant)) and
 /// its constant data (i.e.  [`ConstantData`](crate::ir::ConstantData)).
 #[derive(Clone)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct ConstantPool {
     /// This mapping maintains the insertion order as long as Constants are created with
     /// sequentially increasing integers.
@@ -224,10 +236,7 @@ impl ConstantPool {
             *self.values_to_handles.get(&constant_value).unwrap()
         } else {
             let constant_handle = Constant::new(self.len());
-            self.values_to_handles
-                .insert(constant_value.clone(), constant_handle);
-            self.handles_to_values
-                .insert(constant_handle, ConstantPoolEntry::new(constant_value));
+            self.set(constant_handle, constant_value);
             constant_handle
         }
     }
@@ -236,6 +245,25 @@ impl ConstantPool {
     pub fn get(&self, constant_handle: Constant) -> &ConstantData {
         assert!(self.handles_to_values.contains_key(&constant_handle));
         &self.handles_to_values.get(&constant_handle).unwrap().data
+    }
+
+    /// Link a constant handle to its value. This does not de-duplicate data but does avoid
+    /// replacing any existing constant values. use `set` to tie a specific `const42` to its value;
+    /// use `insert` to add a value and return the next available `const` entity.
+    pub fn set(&mut self, constant_handle: Constant, constant_value: ConstantData) {
+        let replaced = self.handles_to_values.insert(
+            constant_handle,
+            ConstantPoolEntry::new(constant_value.clone()),
+        );
+        assert!(
+            replaced.is_none(),
+            "attempted to overwrite an existing constant {:?}: {:?} => {:?}",
+            constant_handle,
+            &constant_value,
+            replaced.unwrap().data
+        );
+        self.values_to_handles
+            .insert(constant_value, constant_handle);
     }
 
     /// Assign an offset to a given constant, where the offset is the number of bytes from the
@@ -345,6 +373,24 @@ mod tests {
     }
 
     #[test]
+    fn set() {
+        let mut sut = ConstantPool::new();
+        let handle = Constant::with_number(42).unwrap();
+        let data = vec![1, 2, 3];
+        sut.set(handle, data.clone().into());
+        assert_eq!(sut.get(handle), &data.into());
+    }
+
+    #[test]
+    #[should_panic]
+    fn disallow_overwriting_constant() {
+        let mut sut = ConstantPool::new();
+        let handle = Constant::with_number(42).unwrap();
+        sut.set(handle, vec![].into());
+        sut.set(handle, vec![1].into());
+    }
+
+    #[test]
     #[should_panic]
     fn get_nonexistent_constant() {
         let sut = ConstantPool::new();
@@ -374,7 +420,7 @@ mod tests {
         assert_eq!(ConstantData::from([42].as_ref()).to_string(), "0x2a");
         assert_eq!(
             ConstantData::from([3, 2, 1, 0].as_ref()).to_string(),
-            "0x010203"
+            "0x00010203"
         );
         assert_eq!(
             ConstantData::from(3735928559u32.to_le_bytes().as_ref()).to_string(),
@@ -435,12 +481,12 @@ mod tests {
         }
 
         parse_ok("0x00", "0x00");
-        parse_ok("0x00000042", "0x42");
+        parse_ok("0x00000042", "0x00000042");
         parse_ok(
             "0x0102030405060708090a0b0c0d0e0f00",
             "0x0102030405060708090a0b0c0d0e0f00",
         );
-        parse_ok("0x_0000_0043_21", "0x4321");
+        parse_ok("0x_0000_0043_21", "0x0000004321");
 
         parse_err("", "Expected a hexadecimal string, e.g. 0x1234");
         parse_err("0x", "Expected a hexadecimal string, e.g. 0x1234");
