@@ -11,7 +11,7 @@ edition = "2018"
 
 [dependencies]
 cranelift-module = { path = "../cranelift-module", version = "0.70.0" }
-cranelift-native = { path = "../cranelift-native", version = "0.70.0" }
+cranelift-native = { path = "../cranelift-native", version = "0.72.0" }
 region = "2.0.0"
 libc = { version = "0.2.42" }
 errno = "0.2.4"
