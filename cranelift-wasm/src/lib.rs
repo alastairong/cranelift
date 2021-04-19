@@ -56,6 +56,7 @@ mod sections_translator;
 mod state;
 mod translation_utils;
 
+pub use crate::code_translator::translate_operator;
 pub use crate::environ::{
     Alias, DummyEnvironment, FuncEnvironment, GlobalVariable, ModuleEnvironment, ReturnMode,
     TargetEnvironment, WasmError, WasmFuncType, WasmResult, WasmType,
