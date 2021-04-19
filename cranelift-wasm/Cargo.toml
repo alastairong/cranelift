@@ -1,25 +1,33 @@
 [package]
 name = "cranelift-wasm"
-version = "0.70.0"
-authors = ["Forked from work done by The Cranelift Project Developers"]
-license = "Apache-2.0 WITH LLVM-exception"
+version = "0.72.0"
+authors = ["The Cranelift Project Developers"]
 description = "Translator from WebAssembly to Cranelift IR"
-repository = "https://github.com/wasmerio/cranelift/tree/wasmer"
+documentation = "https://docs.rs/cranelift-wasm"
+repository = "https://github.com/bytecodealliance/wasmtime"
+license = "Apache-2.0 WITH LLVM-exception"
+categories = ["no-std", "wasm"]
+readme = "README.md"
+keywords = ["webassembly", "wasm"]
 edition = "2018"
 
 [dependencies]
-wasmparser = { version = "0.51", default-features = false }
+wasmparser = { version = "0.76", default-features = false }
 cranelift-codegen = { path = "../cranelift-codegen", version = "0.72.0", default-features = false }
 cranelift-entity = { path = "../cranelift-entity", version = "0.72.0" }
 cranelift-frontend = { path = "../cranelift-frontend", version = "0.72.0", default-features = false }
-hashbrown = { version = "0.6", optional = true }
+hashbrown = { version = "0.9.1", optional = true }
+itertools = "0.10.0"
 log = { version = "0.4.6", default-features = false }
 serde = { version = "1.0.94", features = ["derive"], optional = true }
+smallvec = "1.6.1"
 thiserror = "1.0.4"
 
 [dev-dependencies]
-wat = "1.0.9"
-target-lexicon = "0.10"
+wat = "1.0.36"
+target-lexicon = "0.11"
+# Enable the riscv feature for cranelift-codegen, as some tests require it
+cranelift-codegen = { path = "../cranelift-codegen", version = "0.72.0", default-features = false, features = ["riscv"] }
 
 [features]
 default = ["std"]
@@ -29,4 +37,3 @@ enable-serde = ["serde"]
 
 [badges]
 maintenance = { status = "experimental" }
-travis-ci = { repository = "bytecodealliance/cranelift" }

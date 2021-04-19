@@ -6,13 +6,14 @@
 //! [Wasmtime]: https://github.com/bytecodealliance/wasmtime
 
 use crate::environ::{
-    FuncEnvironment, GlobalVariable, ModuleEnvironment, ReturnMode, TargetEnvironment, WasmResult,
+    FuncEnvironment, GlobalVariable, ModuleEnvironment, ReturnMode, TargetEnvironment,
+    WasmFuncType, WasmResult,
 };
 use crate::func_translator::FuncTranslator;
-use crate::state::ModuleTranslationState;
+use crate::state::FuncTranslationState;
 use crate::translation_utils::{
-    DefinedFuncIndex, FuncIndex, Global, GlobalIndex, Memory, MemoryIndex, PassiveDataIndex,
-    PassiveElemIndex, SignatureIndex, Table, TableIndex,
+    DataIndex, DefinedFuncIndex, ElemIndex, FuncIndex, Global, GlobalIndex, Memory, MemoryIndex,
+    Table, TableIndex, TypeIndex,
 };
 use core::convert::TryFrom;
 use cranelift_codegen::cursor::FuncCursor;
@@ -21,9 +22,11 @@ use cranelift_codegen::ir::types::*;
 use cranelift_codegen::ir::{self, InstBuilder};
 use cranelift_codegen::isa::TargetFrontendConfig;
 use cranelift_entity::{EntityRef, PrimaryMap, SecondaryMap};
+use cranelift_frontend::FunctionBuilder;
 use std::boxed::Box;
 use std::string::String;
 use std::vec::Vec;
+use wasmparser::{FuncValidator, FunctionBody, Operator, ValidatorResources, WasmFeatures};
 
 /// Compute a `ir::ExternalName` for a given wasm function index.
 fn get_func_name(func_index: FuncIndex) -> ir::ExternalName {
@@ -56,7 +59,7 @@ pub struct DummyModuleInfo {
     config: TargetFrontendConfig,
 
     /// Signatures as provided by `declare_signature`.
-    pub signatures: PrimaryMap<SignatureIndex, ir::Signature>,
+    pub signatures: PrimaryMap<TypeIndex, ir::Signature>,
 
     /// Module and field names of imported functions as provided by `declare_func_import`.
     pub imported_funcs: Vec<(String, String)>,
@@ -71,7 +74,7 @@ pub struct DummyModuleInfo {
     pub imported_memories: Vec<(String, String)>,
 
     /// Functions, imported and local.
-    pub functions: PrimaryMap<FuncIndex, Exportable<SignatureIndex>>,
+    pub functions: PrimaryMap<FuncIndex, Exportable<TypeIndex>>,
 
     /// Function bodies.
     pub function_bodies: PrimaryMap<DefinedFuncIndex, ir::Function>,
@@ -109,6 +112,31 @@ impl DummyModuleInfo {
     }
 }
 
+/// State for tracking and checking reachability at each operator. Used for unit testing with the
+/// `DummyEnvironment`.
+#[derive(Clone)]
+pub struct ExpectedReachability {
+    /// Before- and after-reachability
+    reachability: Vec<(bool, bool)>,
+    before_idx: usize,
+    after_idx: usize,
+}
+
+impl ExpectedReachability {
+    fn check_before(&mut self, reachable: bool) {
+        assert_eq!(reachable, self.reachability[self.before_idx].0);
+        self.before_idx += 1;
+    }
+    fn check_after(&mut self, reachable: bool) {
+        assert_eq!(reachable, self.reachability[self.after_idx].1);
+        self.after_idx += 1;
+    }
+    fn check_end(&self) {
+        assert_eq!(self.before_idx, self.reachability.len());
+        assert_eq!(self.after_idx, self.reachability.len());
+    }
+}
+
 /// This `ModuleEnvironment` implementation is a "naïve" one, doing essentially nothing and
 /// emitting placeholders when forced to. Don't try to execute code translated for this
 /// environment, essentially here for translation debug purposes.
@@ -128,8 +156,14 @@ pub struct DummyEnvironment {
     /// Instructs to collect debug data during translation.
     debug_info: bool,
 
+    /// Name of the module from the wasm file.
+    pub module_name: Option<String>,
+
     /// Function names.
     function_names: SecondaryMap<FuncIndex, String>,
+
+    /// Expected reachability data (before/after for each op) to assert. This is used for testing.
+    expected_reachability: Option<ExpectedReachability>,
 }
 
 impl DummyEnvironment {
@@ -141,17 +175,23 @@ impl DummyEnvironment {
             func_bytecode_sizes: Vec::new(),
             return_mode,
             debug_info,
+            module_name: None,
             function_names: SecondaryMap::new(),
+            expected_reachability: None,
         }
     }
 
     /// Return a `DummyFuncEnvironment` for translating functions within this
     /// `DummyEnvironment`.
     pub fn func_env(&self) -> DummyFuncEnvironment {
-        DummyFuncEnvironment::new(&self.info, self.return_mode)
+        DummyFuncEnvironment::new(
+            &self.info,
+            self.return_mode,
+            self.expected_reachability.clone(),
+        )
     }
 
-    fn get_func_type(&self, func_index: FuncIndex) -> SignatureIndex {
+    fn get_func_type(&self, func_index: FuncIndex) -> TypeIndex {
         self.info.functions[func_index].entity
     }
 
@@ -165,6 +205,17 @@ impl DummyEnvironment {
     pub fn get_func_name(&self, func_index: FuncIndex) -> Option<&str> {
         self.function_names.get(func_index).map(String::as_ref)
     }
+
+    /// Test reachability bits before and after every opcode during translation, as provided by the
+    /// `FuncTranslationState`. This is generally used only for unit tests. This is applied to
+    /// every function in the module (so is likely only useful for test modules with one function).
+    pub fn test_expected_reachability(&mut self, reachability: Vec<(bool, bool)>) {
+        self.expected_reachability = Some(ExpectedReachability {
+            reachability,
+            before_idx: 0,
+            after_idx: 0,
+        });
+    }
 }
 
 /// The `FuncEnvironment` implementation for use by the `DummyEnvironment`.
@@ -172,25 +223,41 @@ pub struct DummyFuncEnvironment<'dummy_environment> {
     pub mod_info: &'dummy_environment DummyModuleInfo,
 
     return_mode: ReturnMode,
+
+    /// Expected reachability data (before/after for each op) to assert. This is used for testing.
+    expected_reachability: Option<ExpectedReachability>,
 }
 
 impl<'dummy_environment> DummyFuncEnvironment<'dummy_environment> {
-    pub fn new(mod_info: &'dummy_environment DummyModuleInfo, return_mode: ReturnMode) -> Self {
+    pub fn new(
+        mod_info: &'dummy_environment DummyModuleInfo,
+        return_mode: ReturnMode,
+        expected_reachability: Option<ExpectedReachability>,
+    ) -> Self {
         Self {
             mod_info,
             return_mode,
+            expected_reachability,
         }
     }
 
     // Create a signature for `sigidx` amended with a `vmctx` argument after the standard wasm
     // arguments.
-    fn vmctx_sig(&self, sigidx: SignatureIndex) -> ir::Signature {
+    fn vmctx_sig(&self, sigidx: TypeIndex) -> ir::Signature {
         let mut sig = self.mod_info.signatures[sigidx].clone();
         sig.params.push(ir::AbiParam::special(
             self.pointer_type(),
             ir::ArgumentPurpose::VMContext,
         ));
         sig
+    }
+
+    fn reference_type(&self) -> ir::Type {
+        match self.pointer_type() {
+            ir::types::I32 => ir::types::R32,
+            ir::types::I64 => ir::types::R64,
+            _ => panic!("unsupported pointer type"),
+        }
     }
 }
 
@@ -269,7 +336,7 @@ impl<'dummy_environment> FuncEnvironment for DummyFuncEnvironment<'dummy_environ
     fn make_indirect_sig(
         &mut self,
         func: &mut ir::Function,
-        index: SignatureIndex,
+        index: TypeIndex,
     ) -> WasmResult<ir::SigRef> {
         // A real implementation would probably change the calling convention and add `vmctx` and
         // signature index arguments.
@@ -293,12 +360,47 @@ impl<'dummy_environment> FuncEnvironment for DummyFuncEnvironment<'dummy_environ
         }))
     }
 
+    fn before_translate_operator(
+        &mut self,
+        _op: &Operator,
+        _builder: &mut FunctionBuilder,
+        state: &FuncTranslationState,
+    ) -> WasmResult<()> {
+        if let Some(ref mut r) = &mut self.expected_reachability {
+            r.check_before(state.reachable());
+        }
+        Ok(())
+    }
+
+    fn after_translate_operator(
+        &mut self,
+        _op: &Operator,
+        _builder: &mut FunctionBuilder,
+        state: &FuncTranslationState,
+    ) -> WasmResult<()> {
+        if let Some(ref mut r) = &mut self.expected_reachability {
+            r.check_after(state.reachable());
+        }
+        Ok(())
+    }
+
+    fn after_translate_function(
+        &mut self,
+        _builder: &mut FunctionBuilder,
+        _state: &FuncTranslationState,
+    ) -> WasmResult<()> {
+        if let Some(ref mut r) = &mut self.expected_reachability {
+            r.check_end();
+        }
+        Ok(())
+    }
+
     fn translate_call_indirect(
         &mut self,
         mut pos: FuncCursor,
         _table_index: TableIndex,
         _table: ir::Table,
-        _sig_index: SignatureIndex,
+        _sig_index: TypeIndex,
         sig_ref: ir::SigRef,
         callee: ir::Value,
         call_args: &[ir::Value],
@@ -379,8 +481,10 @@ impl<'dummy_environment> FuncEnvironment for DummyFuncEnvironment<'dummy_environ
     fn translate_memory_copy(
         &mut self,
         _pos: FuncCursor,
-        _index: MemoryIndex,
-        _heap: ir::Heap,
+        _src_index: MemoryIndex,
+        _src_heap: ir::Heap,
+        _dst_index: MemoryIndex,
+        _dst_heap: ir::Heap,
         _dst: ir::Value,
         _src: ir::Value,
         _len: ir::Value,
@@ -429,7 +533,8 @@ impl<'dummy_environment> FuncEnvironment for DummyFuncEnvironment<'dummy_environ
     fn translate_table_grow(
         &mut self,
         mut pos: FuncCursor,
-        _table_index: u32,
+        _table_index: TableIndex,
+        _table: ir::Table,
         _delta: ir::Value,
         _init_value: ir::Value,
     ) -> WasmResult<ir::Value> {
@@ -438,17 +543,19 @@ impl<'dummy_environment> FuncEnvironment for DummyFuncEnvironment<'dummy_environ
 
     fn translate_table_get(
         &mut self,
-        mut pos: FuncCursor,
-        _table_index: u32,
+        builder: &mut FunctionBuilder,
+        _table_index: TableIndex,
+        _table: ir::Table,
         _index: ir::Value,
     ) -> WasmResult<ir::Value> {
-        Ok(pos.ins().null(self.reference_type()))
+        Ok(builder.ins().null(self.reference_type()))
     }
 
     fn translate_table_set(
         &mut self,
-        _pos: FuncCursor,
-        _table_index: u32,
+        _builder: &mut FunctionBuilder,
+        _table_index: TableIndex,
+        _table: ir::Table,
         _value: ir::Value,
         _index: ir::Value,
     ) -> WasmResult<()> {
@@ -472,7 +579,7 @@ impl<'dummy_environment> FuncEnvironment for DummyFuncEnvironment<'dummy_environ
     fn translate_table_fill(
         &mut self,
         _pos: FuncCursor,
-        _table_index: u32,
+        _table_index: TableIndex,
         _dst: ir::Value,
         _val: ir::Value,
         _len: ir::Value,
@@ -500,7 +607,7 @@ impl<'dummy_environment> FuncEnvironment for DummyFuncEnvironment<'dummy_environ
     fn translate_ref_func(
         &mut self,
         mut pos: FuncCursor,
-        _func_index: u32,
+        _func_index: FuncIndex,
     ) -> WasmResult<ir::Value> {
         Ok(pos.ins().null(self.reference_type()))
     }
@@ -521,6 +628,29 @@ impl<'dummy_environment> FuncEnvironment for DummyFuncEnvironment<'dummy_environ
     ) -> WasmResult<()> {
         Ok(())
     }
+
+    fn translate_atomic_wait(
+        &mut self,
+        mut pos: FuncCursor,
+        _index: MemoryIndex,
+        _heap: ir::Heap,
+        _addr: ir::Value,
+        _expected: ir::Value,
+        _timeout: ir::Value,
+    ) -> WasmResult<ir::Value> {
+        Ok(pos.ins().iconst(I32, -1))
+    }
+
+    fn translate_atomic_notify(
+        &mut self,
+        mut pos: FuncCursor,
+        _index: MemoryIndex,
+        _heap: ir::Heap,
+        _addr: ir::Value,
+        _count: ir::Value,
+    ) -> WasmResult<ir::Value> {
+        Ok(pos.ins().iconst(I32, 0))
+    }
 }
 
 impl TargetEnvironment for DummyEnvironment {
@@ -530,31 +660,31 @@ impl TargetEnvironment for DummyEnvironment {
 }
 
 impl<'data> ModuleEnvironment<'data> for DummyEnvironment {
-    fn declare_signature(&mut self, sig: ir::Signature) -> WasmResult<()> {
+    fn declare_type_func(&mut self, _wasm: WasmFuncType, sig: ir::Signature) -> WasmResult<()> {
         self.info.signatures.push(sig);
         Ok(())
     }
 
     fn declare_func_import(
         &mut self,
-        sig_index: SignatureIndex,
+        index: TypeIndex,
         module: &'data str,
-        field: &'data str,
+        field: Option<&'data str>,
     ) -> WasmResult<()> {
         assert_eq!(
             self.info.functions.len(),
             self.info.imported_funcs.len(),
             "Imported functions must be declared first"
         );
-        self.info.functions.push(Exportable::new(sig_index));
+        self.info.functions.push(Exportable::new(index));
         self.info
             .imported_funcs
-            .push((String::from(module), String::from(field)));
+            .push((String::from(module), String::from(field.unwrap())));
         Ok(())
     }
 
-    fn declare_func_type(&mut self, sig_index: SignatureIndex) -> WasmResult<()> {
-        self.info.functions.push(Exportable::new(sig_index));
+    fn declare_func_type(&mut self, index: TypeIndex) -> WasmResult<()> {
+        self.info.functions.push(Exportable::new(index));
         Ok(())
     }
 
@@ -567,12 +697,12 @@ impl<'data> ModuleEnvironment<'data> for DummyEnvironment {
         &mut self,
         global: Global,
         module: &'data str,
-        field: &'data str,
+        field: Option<&'data str>,
     ) -> WasmResult<()> {
         self.info.globals.push(Exportable::new(global));
         self.info
             .imported_globals
-            .push((String::from(module), String::from(field)));
+            .push((String::from(module), String::from(field.unwrap())));
         Ok(())
     }
 
@@ -585,12 +715,12 @@ impl<'data> ModuleEnvironment<'data> for DummyEnvironment {
         &mut self,
         table: Table,
         module: &'data str,
-        field: &'data str,
+        field: Option<&'data str>,
     ) -> WasmResult<()> {
         self.info.tables.push(Exportable::new(table));
         self.info
             .imported_tables
-            .push((String::from(module), String::from(field)));
+            .push((String::from(module), String::from(field.unwrap())));
         Ok(())
     }
 
@@ -607,7 +737,7 @@ impl<'data> ModuleEnvironment<'data> for DummyEnvironment {
 
     fn declare_passive_element(
         &mut self,
-        _elem_index: PassiveElemIndex,
+        _elem_index: ElemIndex,
         _segments: Box<[FuncIndex]>,
     ) -> WasmResult<()> {
         Ok(())
@@ -615,7 +745,7 @@ impl<'data> ModuleEnvironment<'data> for DummyEnvironment {
 
     fn declare_passive_data(
         &mut self,
-        _elem_index: PassiveDataIndex,
+        _elem_index: DataIndex,
         _segments: &'data [u8],
     ) -> WasmResult<()> {
         Ok(())
@@ -630,12 +760,12 @@ impl<'data> ModuleEnvironment<'data> for DummyEnvironment {
         &mut self,
         memory: Memory,
         module: &'data str,
-        field: &'data str,
+        field: Option<&'data str>,
     ) -> WasmResult<()> {
         self.info.memories.push(Exportable::new(memory));
         self.info
             .imported_memories
-            .push((String::from(module), String::from(field)));
+            .push((String::from(module), String::from(field.unwrap())));
         Ok(())
     }
 
@@ -698,12 +828,17 @@ impl<'data> ModuleEnvironment<'data> for DummyEnvironment {
 
     fn define_function_body(
         &mut self,
-        module_translation_state: &ModuleTranslationState,
-        body_bytes: &'data [u8],
-        body_offset: usize,
+        mut validator: FuncValidator<ValidatorResources>,
+        body: FunctionBody<'data>,
     ) -> WasmResult<()> {
+        self.func_bytecode_sizes
+            .push(body.get_binary_reader().bytes_remaining());
         let func = {
-            let mut func_environ = DummyFuncEnvironment::new(&self.info, self.return_mode);
+            let mut func_environ = DummyFuncEnvironment::new(
+                &self.info,
+                self.return_mode,
+                self.expected_reachability.clone(),
+            );
             let func_index =
                 FuncIndex::new(self.get_num_func_imports() + self.info.function_bodies.len());
             let name = get_func_name(func_index);
@@ -712,22 +847,29 @@ impl<'data> ModuleEnvironment<'data> for DummyEnvironment {
             if self.debug_info {
                 func.collect_debug_info();
             }
-            self.trans.translate(
-                module_translation_state,
-                body_bytes,
-                body_offset,
-                &mut func,
-                &mut func_environ,
-            )?;
+            self.trans
+                .translate_body(&mut validator, body, &mut func, &mut func_environ)?;
             func
         };
-        self.func_bytecode_sizes.push(body_bytes.len());
         self.info.function_bodies.push(func);
         Ok(())
     }
 
-    fn declare_func_name(&mut self, func_index: FuncIndex, name: &'data str) -> WasmResult<()> {
+    fn declare_module_name(&mut self, name: &'data str) {
+        self.module_name = Some(String::from(name));
+    }
+
+    fn declare_func_name(&mut self, func_index: FuncIndex, name: &'data str) {
         self.function_names[func_index] = String::from(name);
-        Ok(())
+    }
+
+    fn wasm_features(&self) -> WasmFeatures {
+        WasmFeatures {
+            multi_value: true,
+            simd: true,
+            reference_types: true,
+            bulk_memory: true,
+            ..WasmFeatures::default()
+        }
     }
 }
